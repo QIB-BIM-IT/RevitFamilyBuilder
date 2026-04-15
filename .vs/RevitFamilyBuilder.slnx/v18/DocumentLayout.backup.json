@@ -1,0 +1,57 @@
+{
+  "Version": 1,
+  "WorkspaceRootPath": "C:\\Users\\dave.otis\\Desktop\\Model_Test\\C#_tools\\RevitFamilyBuilder\\",
+  "Documents": [
+    {
+      "AbsoluteMoniker": "D:0:0:{95309432-3969-4F67-8A17-A9BF42393AC5}|RevitFamilyBuilder.csproj|c:\\users\\dave.otis\\desktop\\model_test\\c#_tools\\revitfamilybuilder\\familybuilder\\familybuilderengine.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{95309432-3969-4F67-8A17-A9BF42393AC5}|RevitFamilyBuilder.csproj|solutionrelative:familybuilder\\familybuilderengine.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{95309432-3969-4F67-8A17-A9BF42393AC5}|RevitFamilyBuilder.csproj|C:\\Users\\dave.otis\\Desktop\\Model_Test\\C#_tools\\RevitFamilyBuilder\\mainwindow.xaml.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{95309432-3969-4F67-8A17-A9BF42393AC5}|RevitFamilyBuilder.csproj|solutionrelative:mainwindow.xaml.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    }
+  ],
+  "DocumentGroupContainers": [
+    {
+      "Orientation": 0,
+      "VerticalTabListWidth": 256,
+      "DocumentGroups": [
+        {
+          "DockedWidth": 200,
+          "SelectedChildIndex": 2,
+          "Children": [
+            {
+              "$type": "Bookmark",
+              "Name": "ST:0:0:{1c4feeaa-4718-4aa9-859d-94ce25d182ba}"
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 1,
+              "Title": "MainWindow.xaml.cs",
+              "DocumentMoniker": "C:\\Users\\dave.otis\\Desktop\\Model_Test\\C#_tools\\RevitFamilyBuilder\\MainWindow.xaml.cs",
+              "RelativeDocumentMoniker": "MainWindow.xaml.cs",
+              "ToolTip": "C:\\Users\\dave.otis\\Desktop\\Model_Test\\C#_tools\\RevitFamilyBuilder\\MainWindow.xaml.cs",
+              "RelativeToolTip": "MainWindow.xaml.cs",
+              "ViewState": "AgIAAAAAAAAAAAAAAAAAABMAAAAuAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2026-04-08T09:55:21.856Z"
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 0,
+              "Title": "FamilyBuilderEngine.cs",
+              "DocumentMoniker": "C:\\Users\\dave.otis\\Desktop\\Model_Test\\C#_tools\\RevitFamilyBuilder\\FamilyBuilder\\FamilyBuilderEngine.cs",
+              "RelativeDocumentMoniker": "FamilyBuilder\\FamilyBuilderEngine.cs",
+              "ToolTip": "C:\\Users\\dave.otis\\Desktop\\Model_Test\\C#_tools\\RevitFamilyBuilder\\FamilyBuilder\\FamilyBuilderEngine.cs",
+              "RelativeToolTip": "FamilyBuilder\\FamilyBuilderEngine.cs",
+              "ViewState": "AgIAAAAAAAAAAAAAAAAAAA8AAAAkAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2026-04-03T16:20:16.122Z",
+              "EditorCaption": ""
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

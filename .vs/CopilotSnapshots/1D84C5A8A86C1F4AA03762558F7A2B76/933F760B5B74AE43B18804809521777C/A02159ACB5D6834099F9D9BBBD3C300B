@@ -1,0 +1,204 @@
+﻿using System.Collections.Generic;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Converters;
+using Newtonsoft.Json.Serialization;
+using RevitFamilyBuilder.Schema;
+
+namespace RevitFamilyBuilder.Services
+{
+    public class JsonSchemaService
+    {
+        private static readonly JsonSerializerSettings _settings = new JsonSerializerSettings
+        {
+            ContractResolver = new DefaultContractResolver
+            {
+                NamingStrategy = new SnakeCaseNamingStrategy()
+            },
+            Converters = { new StringEnumConverter(new SnakeCaseNamingStrategy(), false) },
+            MissingMemberHandling = MissingMemberHandling.Ignore
+        };
+
+        public FamilyDefinition Parse(string json)
+        {
+            return JsonConvert.DeserializeObject<FamilyDefinition>(json, _settings);
+        }
+
+        public ValidationResult Validate(FamilyDefinition definition)
+        {
+            var errors = new List<string>();
+
+            // --- Structural checks (must pass before business rules) ---
+
+            if (string.IsNullOrEmpty(definition.SchemaVersion))
+                errors.Add("schema_version is required.");
+
+            if (string.IsNullOrEmpty(definition.FamilyName))
+                errors.Add("family_name is required.");
+
+            if (string.IsNullOrEmpty(definition.FamilyTemplate))
+                errors.Add("family_template is required.");
+
+            if (string.IsNullOrEmpty(definition.Category))
+                errors.Add("category is required.");
+
+            if (definition.Parameters == null)
+                errors.Add("parameters list must not be null.");
+
+            if (definition.ReferencePlanes == null)
+                errors.Add("reference_planes list must not be null.");
+
+            if (definition.Geometry == null)
+                errors.Add("geometry list must not be null.");
+
+            // Return early — business rules cannot run safely on null lists.
+            if (errors.Count > 0)
+                return ValidationResult.Fail(errors.ToArray());
+
+            // --- Build lookup sets for cross-reference checks ---
+
+            var parameterNames = new HashSet<string>();
+            var planeNames = new HashSet<string>();
+
+            // --- Parameter rules ---
+
+            foreach (ParameterDefinition param in definition.Parameters)
+            {
+                if (string.IsNullOrWhiteSpace(param.Name))
+                {
+                    errors.Add("A parameter has an empty name.");
+                    continue;
+                }
+
+                if (!parameterNames.Add(param.Name))
+                    errors.Add("Duplicate parameter name: \"" + param.Name + "\".");
+            }
+
+            // --- Reference plane rules ---
+
+            foreach (ReferencePlaneDefinition plane in definition.ReferencePlanes)
+            {
+                if (string.IsNullOrWhiteSpace(plane.Name))
+                {
+                    errors.Add("A reference plane has an empty name.");
+                    continue;
+                }
+
+                if (!planeNames.Add(plane.Name))
+                    errors.Add("Duplicate reference plane name: \"" + plane.Name + "\".");
+            }
+
+            // --- Dimension rules ---
+
+            if (definition.Dimensions != null)
+            {
+                foreach (DimensionDefinition dim in definition.Dimensions)
+                {
+                    if (!planeNames.Contains(dim.ReferencePlane1))
+                        errors.Add("Dimension references unknown reference plane: \"" + dim.ReferencePlane1 + "\".");
+
+                    if (dim.ReferencePlane2 != null && !planeNames.Contains(dim.ReferencePlane2))
+                        errors.Add("Dimension references unknown reference plane: \"" + dim.ReferencePlane2 + "\".");
+
+                    if (!string.IsNullOrWhiteSpace(dim.ParameterName) && !parameterNames.Contains(dim.ParameterName))
+                        errors.Add("Dimension references unknown parameter: \"" + dim.ParameterName + "\".");
+                }
+            }
+
+            // --- Geometry rules ---
+
+            if (definition.Geometry.Count == 0)
+            {
+                errors.Add("geometry must contain at least one item.");
+            }
+            else
+            {
+                foreach (GeometryDefinition geo in definition.Geometry)
+                {
+                    if (string.IsNullOrWhiteSpace(geo.Profile))
+                        errors.Add("A geometry item has an empty profile.");
+
+                    if (!parameterNames.Contains(geo.WidthParameter))
+                        errors.Add("Geometry references unknown width parameter: \"" + geo.WidthParameter + "\".");
+
+                    if (!parameterNames.Contains(geo.DepthParameter))
+                        errors.Add("Geometry references unknown depth parameter: \"" + geo.DepthParameter + "\".");
+
+                    if (!parameterNames.Contains(geo.HeightParameter))
+                        errors.Add("Geometry references unknown height parameter: \"" + geo.HeightParameter + "\".");
+                }
+            }
+
+            // --- Type rules (optional — null or empty list is valid) ---
+
+            if (definition.Types != null && definition.Types.Count > 0)
+            {
+                var typeNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+                for (int i = 0; i < definition.Types.Count; i++)
+                {
+                    FamilyTypeDefinition t = definition.Types[i];
+                    string label = "types[" + i + "]";
+
+                    if (string.IsNullOrWhiteSpace(t.Name))
+                    {
+                        errors.Add(label + ": name must not be empty.");
+                        continue;
+                    }
+
+                    if (!typeNames.Add(t.Name))
+                    {
+                        errors.Add(label + ": duplicate type name \"" + t.Name + "\".");
+                        continue;
+                    }
+
+                    if (t.ParameterValues != null)
+                    {
+                        foreach (string key in t.ParameterValues.Keys)
+                        {
+                            if (!parameterNames.Contains(key))
+                                errors.Add(label + " (\"" + t.Name
+                                    + "\"): parameter_values key \""
+                                    + key + "\" does not match any declared parameter.");
+                        }
+                    }
+                }
+            }
+
+            // --- Formula rules (optional — null or empty list is valid) ---
+
+            if (definition.Formulas != null && definition.Formulas.Count > 0)
+            {
+                for (int i = 0; i < definition.Formulas.Count; i++)
+                {
+                    FormulaDefinition f = definition.Formulas[i];
+                    string label = "formulas[" + i + "]";
+
+                    if (string.IsNullOrWhiteSpace(f.ParameterName))
+                    {
+                        errors.Add(label + ": parameter_name must not be empty.");
+                        continue;
+                    }
+
+                    if (string.IsNullOrWhiteSpace(f.Expression))
+                    {
+                        errors.Add(label + " (\"" + f.ParameterName
+                            + "\"): expression must not be empty.");
+                        continue;
+                    }
+
+                    if (!parameterNames.Contains(f.ParameterName))
+                    {
+                        errors.Add(label + ": parameter_name \""
+                            + f.ParameterName
+                            + "\" does not match any declared parameter.");
+                    }
+                }
+            }
+
+            if (errors.Count > 0)
+                return ValidationResult.Fail(errors.ToArray());
+
+            return ValidationResult.Ok();
+        }
+    }
+}

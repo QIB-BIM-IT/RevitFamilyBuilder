@@ -1,0 +1,468 @@
+﻿using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Text;
+using System.Threading.Tasks;
+using System.Windows;
+using System.Windows.Media;
+using Microsoft.Win32;
+using Autodesk.Revit.UI;
+using Newtonsoft.Json.Linq;
+using RevitFamilyBuilder.Schema;
+using RevitFamilyBuilder.Services;
+
+namespace RevitFamilyBuilder
+{
+    public partial class MainWindow : Window
+    {
+        private readonly UIApplication _uiApp;
+
+        // Holds the last valid AI-generated JSON until the user confirms or cancels.
+        private string _pendingGeneratedJson;
+
+        // Holds the match_status from the last Claude review (drives Confirm button state).
+        private string _pendingMatchStatus;
+
+        public MainWindow(UIApplication uiApp)
+        {
+            _uiApp = uiApp;
+            InitializeComponent();
+
+
+        }
+
+        private void BrowseImageButton_Click(object sender, RoutedEventArgs e)
+        {
+            OpenFileDialog dialog = new OpenFileDialog();
+            dialog.Title = "Choisir une image";
+            dialog.Filter = "Image Files|*.png;*.jpg;*.jpeg;*.bmp";
+
+            bool? result = dialog.ShowDialog();
+
+            if (result == true)
+            {
+                ImagePathTextBox.Text = dialog.FileName;
+                StatusTextBlock.Text = "Image sélectionnée.";
+            }
+        }
+
+        private async void GenerateJsonButton_Click(object sender, RoutedEventArgs e)
+        {
+            string prompt = PromptTextBox.Text ?? string.Empty;
+
+            // Empty prompt — use sample fallback.
+            if (string.IsNullOrWhiteSpace(prompt))
+            {
+                JsonPreviewTextBox.Text = new SampleJsonService().GetSampleJson();
+                StatusTextBlock.Text = "Sample JSON generated (no prompt entered).";
+                return;
+            }
+
+            // Resolve optional image.
+            string imagePath  = ImagePathTextBox.Text ?? string.Empty;
+            bool   hasImage   = !string.IsNullOrWhiteSpace(imagePath);
+
+            if (hasImage)
+            {
+                if (!File.Exists(imagePath))
+                {
+                    TaskDialog.Show("Generate JSON",
+                        "Image file not found:\n" + imagePath);
+                    StatusTextBlock.Text = "AI generation failed: image not found.";
+                    return;
+                }
+
+                string mediaType = GetImageMediaType(imagePath);
+                if (mediaType == null)
+                {
+                    TaskDialog.Show("Generate JSON",
+                        "Unsupported image format. Use .png, .jpg, .jpeg, .webp, or .gif.\n"
+                        + "File: " + imagePath);
+                    StatusTextBlock.Text = "AI generation failed: unsupported image format.";
+                    return;
+                }
+            }
+
+            // First generation attempt.
+            StatusTextBlock.Text = hasImage
+                ? "Calling Claude API (image + text)…"
+                : "Calling Claude API…";
+
+            string firstWrapper;
+            try
+            {
+                if (hasImage)
+                {
+                    string imageBase64 = Convert.ToBase64String(File.ReadAllBytes(imagePath));
+                    string mediaType   = GetImageMediaType(imagePath);
+                    firstWrapper = await ClaudeService.GenerateJsonWithImageAsync(
+                        prompt, imageBase64, mediaType);
+                }
+                else
+                {
+                    firstWrapper = await ClaudeService.GenerateJsonAsync(prompt);
+                }
+            }
+            catch (Exception ex)
+            {
+                TaskDialog.Show("Generate JSON", "Claude API error:\n" + ex.Message);
+                StatusTextBlock.Text = "AI generation failed.";
+                return;
+            }
+
+            // Extract proposed_json and review from the wrapper response.
+            if (!TryExtractWrapper(firstWrapper, out string firstProposed, out JObject firstReview))
+            {
+                TaskDialog.Show("Generate JSON",
+                    "Claude returned an unexpected response format.\n\nRaw response:\n" + firstWrapper);
+                StatusTextBlock.Text = "AI generation failed: unexpected response format.";
+                return;
+            }
+
+            // Validate proposed_json against the family schema.
+            var schemaService = new JsonSchemaService();
+            List<string> firstErrors = TryParseAndValidate(schemaService, firstProposed);
+
+            if (firstErrors.Count == 0)
+            {
+                PresentForReview(firstProposed, firstReview, wasRepaired: false);
+                return;
+            }
+
+            // One repair attempt — pass only the invalid proposed_json and its errors.
+            StatusTextBlock.Text = "Validation failed ("
+                + firstErrors.Count + " error(s)). Attempting repair…";
+            string repairedWrapper;
+            try
+            {
+                repairedWrapper = await ClaudeService.RepairJsonAsync(prompt, firstProposed, firstErrors);
+            }
+            catch (Exception ex)
+            {
+                TaskDialog.Show("Generate JSON", "Repair API error:\n" + ex.Message);
+                StatusTextBlock.Text = "AI generation failed (repair error).";
+                return;
+            }
+
+            if (!TryExtractWrapper(repairedWrapper, out string repairedProposed, out JObject repairedReview))
+            {
+                TaskDialog.Show("Generate JSON",
+                    "Repair returned an unexpected response format.\n\nRaw response:\n" + repairedWrapper);
+                StatusTextBlock.Text = "AI generation failed: unexpected repair response format.";
+                return;
+            }
+
+            List<string> repairedErrors = TryParseAndValidate(schemaService, repairedProposed);
+
+            if (repairedErrors.Count == 0)
+            {
+                PresentForReview(repairedProposed, repairedReview, wasRepaired: true);
+                return;
+            }
+
+            // Repair still failed — report errors, do not crash.
+            var sb = new StringBuilder();
+            sb.AppendLine("Repair attempt did not fix all issues.");
+            sb.AppendLine("Remaining errors (" + repairedErrors.Count + "):");
+            foreach (string error in repairedErrors)
+                sb.AppendLine("  - " + error);
+            TaskDialog.Show("Generate JSON", sb.ToString());
+            StatusTextBlock.Text = "AI generation failed after repair ("
+                + repairedErrors.Count + " error(s)).";
+        }
+
+        // Maps a file extension to the Anthropic media_type string.
+        // Returns null for unsupported formats.
+        private static string GetImageMediaType(string path)
+        {
+            switch (Path.GetExtension(path).ToLowerInvariant())
+            {
+                case ".png":            return "image/png";
+                case ".jpg":
+                case ".jpeg":           return "image/jpeg";
+                case ".webp":           return "image/webp";
+                case ".gif":            return "image/gif";
+                default:                return null;
+            }
+        }
+
+        // Tries to parse and validate JSON. Returns an empty list on success,
+        // or a list containing the validation errors (or a parse error) on failure.
+        private static List<string> TryParseAndValidate(JsonSchemaService service, string json)
+        {
+            try
+            {
+                var definition = service.Parse(json);
+                var result     = service.Validate(definition);
+                return result.IsValid ? new List<string>() : result.Errors;
+            }
+            catch (Exception ex)
+            {
+                return new List<string> { "Parse error: " + ex.Message };
+            }
+        }
+
+        // ── AI Review card ──────────────────────────────────────────────────────
+
+        private void ShowAiReviewCard()
+        {
+            AiReviewCard.Visibility = System.Windows.Visibility.Visible;
+        }
+
+        private void HideAiReviewCard()
+        {
+            AiReviewCard.Visibility = System.Windows.Visibility.Collapsed;
+        }
+
+        private void FillAiReviewCard(
+            string matchStatus,
+            string model,
+            string dimensions,
+            string source,
+            string confidence,
+            string warnings,
+            string buildSummary)
+        {
+            // Match status badge — human-readable label + colour.
+            AiReviewMatchStatusText.Text       = FormatMatchStatus(matchStatus);
+            AiReviewMatchStatusText.Foreground = MatchStatusBrush(matchStatus);
+            AiReviewCard.BorderBrush           = MatchStatusBrush(matchStatus);
+
+            AiReviewModelText.Text        = string.IsNullOrWhiteSpace(model)        ? "—" : model;
+            AiReviewDimensionsText.Text   = string.IsNullOrWhiteSpace(dimensions)   ? "—" : dimensions;
+            AiReviewSourceText.Text       = string.IsNullOrWhiteSpace(source)       ? "—" : source;
+            AiReviewConfidenceText.Text   = string.IsNullOrWhiteSpace(confidence)   ? "—" : confidence;
+            AiReviewWarningsText.Text     = string.IsNullOrWhiteSpace(warnings)     ? "—" : warnings;
+            AiReviewBuildSummaryText.Text = string.IsNullOrWhiteSpace(buildSummary) ? "—" : buildSummary;
+        }
+
+        // Converts a snake_case match_status token to a human-readable label.
+        private static string FormatMatchStatus(string raw)
+        {
+            switch (raw)
+            {
+                case "match_found":             return "Match found";
+                case "ambiguous_match":         return "Ambiguous match";
+                case "no_match":                return "No match";
+                case "insufficient_information": return "Insufficient information";
+                default: return string.IsNullOrWhiteSpace(raw) ? "—" : raw;
+            }
+        }
+
+        // Returns a colour brush that reflects the match quality at a glance.
+        private static SolidColorBrush MatchStatusBrush(string raw)
+        {
+            switch (raw)
+            {
+                case "match_found":             return new SolidColorBrush(Color.FromRgb(0x10, 0x7C, 0x10)); // green
+                case "ambiguous_match":         return new SolidColorBrush(Color.FromRgb(0xC8, 0x7A, 0x14)); // amber
+                case "no_match":                return new SolidColorBrush(Color.FromRgb(0xD1, 0x34, 0x38)); // red
+                case "insufficient_information": return new SolidColorBrush(Color.FromRgb(0x88, 0x88, 0x88)); // grey
+                default:                        return new SolidColorBrush(Color.FromRgb(0x00, 0x78, 0xD4)); // blue (default)
+            }
+        }
+
+        private void ConfirmAndGenerateButton_Click(object sender, RoutedEventArgs e)
+        {
+            // Defensive guard — button should already be disabled for these statuses.
+            if (_pendingMatchStatus == "no_match" || _pendingMatchStatus == "insufficient_information")
+            {
+                TaskDialog.Show("AI Review",
+                    "Cannot confirm: Claude reported "" + FormatMatchStatus(_pendingMatchStatus) + "".\n"
+                    + "Please regenerate with a clearer prompt or image.");
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(_pendingGeneratedJson))
+            {
+                TaskDialog.Show("AI Review", "No generated JSON to confirm.");
+                return;
+            }
+
+            JsonPreviewTextBox.Text = _pendingGeneratedJson;
+            _pendingGeneratedJson   = null;
+            _pendingMatchStatus     = null;
+            ResetConfirmButton();
+            HideAiReviewCard();
+            StatusTextBlock.Text = "JSON confirmed — ready to validate and build.";
+        }
+
+        private void RegenerateButton_Click(object sender, RoutedEventArgs e)
+        {
+            _pendingGeneratedJson = null;
+            _pendingMatchStatus   = null;
+            ResetConfirmButton();
+            HideAiReviewCard();
+            // Re-run the full generate flow with the current prompt and image.
+            GenerateJsonButton_Click(sender, e);
+        }
+
+        private void CancelAiReviewButton_Click(object sender, RoutedEventArgs e)
+        {
+            _pendingGeneratedJson = null;
+            _pendingMatchStatus   = null;
+            ResetConfirmButton();
+            HideAiReviewCard();
+            StatusTextBlock.Text = "AI Review cancelled.";
+        }
+
+        // Restores the Confirm button to its default enabled/green state for the next session.
+        private void ResetConfirmButton()
+        {
+            ConfirmAndGenerateButton.IsEnabled  = true;
+            ConfirmAndGenerateButton.Background =
+                new SolidColorBrush(Color.FromRgb(0x10, 0x7C, 0x10));
+        }
+
+        // Stores valid proposed_json; populates the AI Review card from Claude's own review block.
+        private void PresentForReview(string proposedJson, JObject reviewObj, bool wasRepaired)
+        {
+            _pendingGeneratedJson = proposedJson;
+
+            _pendingMatchStatus = FillCardFromReview(reviewObj);
+
+            // Enable Confirm only for match_found and ambiguous_match (proposed_json is valid).
+            bool confirmAllowed = _pendingMatchStatus == "match_found"
+                               || _pendingMatchStatus == "ambiguous_match";
+            ConfirmAndGenerateButton.IsEnabled  = confirmAllowed;
+            ConfirmAndGenerateButton.Background =
+                confirmAllowed
+                    ? new SolidColorBrush(Color.FromRgb(0x10, 0x7C, 0x10))  // green
+                    : new SolidColorBrush(Color.FromRgb(0x55, 0x55, 0x55)); // grey
+
+            ShowAiReviewCard();
+
+            StatusTextBlock.Text = wasRepaired
+                ? "AI JSON ready for review (repaired)."
+                : "AI JSON ready for review.";
+        }
+
+        // Fills the AI Review card directly from Claude's review JObject.
+        // Returns the raw match_status string so the caller can configure button state.
+        private string FillCardFromReview(JObject review)
+        {
+            string matchStatus = review?["match_status"]?.Value<string>() ?? string.Empty;
+            string model       = review?["selected_model"]?.Value<string>()      ?? string.Empty;
+            string dimensions  = review?["detected_dimensions"]?.Value<string>() ?? string.Empty;
+            string source      = review?["source"]?.Value<string>()              ?? string.Empty;
+            string confidence  = review?["confidence"]?.Value<string>()          ?? string.Empty;
+            string summary     = review?["build_summary"]?.Value<string>()       ?? string.Empty;
+
+            // Title-case confidence for display (API returns lowercase).
+            if (!string.IsNullOrEmpty(confidence))
+                confidence = char.ToUpper(confidence[0]) + confidence.Substring(1);
+
+            var warningsArr = review?["warnings"] as JArray;
+            string warnings = warningsArr != null && warningsArr.Count > 0
+                ? string.Join("\n", warningsArr.Values<string>())
+                : "None";
+
+            FillAiReviewCard(matchStatus, model, dimensions, source, confidence, warnings, summary);
+            return matchStatus;
+        }
+
+        // Extracts proposed_json (as a JSON string) and the review JObject from a Claude wrapper response.
+        // Returns false if the wrapper cannot be parsed or is missing required fields.
+        private static bool TryExtractWrapper(
+            string wrapperJson, out string proposedJson, out JObject reviewObj)
+        {
+            proposedJson = null;
+            reviewObj    = new JObject();
+            try
+            {
+                JObject wrapper = JObject.Parse(wrapperJson);
+                JToken proposed = wrapper["proposed_json"];
+                if (proposed == null) return false;
+                proposedJson = proposed.ToString();
+                reviewObj    = wrapper["review"] as JObject ?? new JObject();
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        // ── Validate / Build ────────────────────────────────────────────────────
+
+        private void ValidateJsonButton_Click(object sender, RoutedEventArgs e)
+        {
+            string json = JsonPreviewTextBox.Text;
+
+            if (string.IsNullOrWhiteSpace(json))
+            {
+                TaskDialog.Show("Validate JSON", "No JSON to validate. Generate a sample first.");
+                StatusTextBlock.Text = "Validation failed: empty input.";
+                return;
+            }
+
+            try
+            {
+                var service = new JsonSchemaService();
+                var definition = service.Parse(json);
+                var result = service.Validate(definition);
+
+                if (result.IsValid)
+                {
+                    TaskDialog.Show("Validate JSON", "Validation passed. Family: " + definition.FamilyName);
+                    StatusTextBlock.Text = "Validation passed.";
+                }
+                else
+                {
+                    var sb = new StringBuilder();
+                    sb.AppendLine("Validation failed:");
+                    foreach (string error in result.Errors)
+                        sb.AppendLine("  - " + error);
+                    TaskDialog.Show("Validate JSON", sb.ToString());
+                    StatusTextBlock.Text = "Validation failed (" + result.Errors.Count + " error(s)).";
+                }
+            }
+            catch (Exception ex)
+            {
+                TaskDialog.Show("Validate JSON", "Parse error: " + ex.Message);
+                StatusTextBlock.Text = "Validation failed: invalid JSON.";
+            }
+        }
+
+        private void BuildFamilyButton_Click(object sender, RoutedEventArgs e)
+        {
+            string json = JsonPreviewTextBox.Text;
+
+            if (string.IsNullOrWhiteSpace(json))
+            {
+                TaskDialog.Show("Build Family", "No JSON to build. Generate and validate a sample first.");
+                StatusTextBlock.Text = "Build failed: empty input.";
+                return;
+            }
+
+            try
+            {
+                var schemaService = new JsonSchemaService();
+                var definition = schemaService.Parse(json);
+                var validation = schemaService.Validate(definition);
+
+                if (!validation.IsValid)
+                {
+                    var sb = new StringBuilder();
+                    sb.AppendLine("Validation failed. Fix errors before building:");
+                    foreach (string error in validation.Errors)
+                        sb.AppendLine("  - " + error);
+                    TaskDialog.Show("Build Family", sb.ToString());
+                    StatusTextBlock.Text = "Build failed: validation errors (" + validation.Errors.Count + ").";
+                    return;
+                }
+
+                var coordinator = new FamilyGenerationCoordinator();
+                string message = coordinator.Run(definition, _uiApp);
+
+                TaskDialog.Show("Build Family", message);
+                StatusTextBlock.Text = "Family document created: " + definition.FamilyName + ".";
+            }
+            catch (Exception ex)
+            {
+                TaskDialog.Show("Build Family", "Error: " + ex.Message);
+                StatusTextBlock.Text = "Build failed: unexpected error.";
+            }
+        }
+    }
+}

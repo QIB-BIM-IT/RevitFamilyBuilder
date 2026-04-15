@@ -1,0 +1,12 @@
+C:\Users\dave.otis\Desktop\Model_Test\C#_tools\RevitFamilyBuilder\bin\Debug\RevitFamilyBuilder.dll
+C:\Users\dave.otis\Desktop\Model_Test\C#_tools\RevitFamilyBuilder\obj\Debug\RevitFamilyBuilder.csproj.AssemblyReference.cache
+C:\Users\dave.otis\Desktop\Model_Test\C#_tools\RevitFamilyBuilder\obj\Debug\MainWindow.baml
+C:\Users\dave.otis\Desktop\Model_Test\C#_tools\RevitFamilyBuilder\obj\Debug\MainWindow.g.cs
+C:\Users\dave.otis\Desktop\Model_Test\C#_tools\RevitFamilyBuilder\obj\Debug\RevitFamilyBuilder_MarkupCompile.cache
+C:\Users\dave.otis\Desktop\Model_Test\C#_tools\RevitFamilyBuilder\obj\Debug\RevitFamilyBuilder.g.resources
+C:\Users\dave.otis\Desktop\Model_Test\C#_tools\RevitFamilyBuilder\obj\Debug\RevitFamilyBuilder.csproj.CoreCompileInputs.cache
+C:\Users\dave.otis\Desktop\Model_Test\C#_tools\RevitFamilyBuilder\obj\Debug\RevitFamilyBuilder.dll
+C:\Users\dave.otis\Desktop\Model_Test\C#_tools\RevitFamilyBuilder\obj\Debug\RevitFamilyBuilder.pdb
+C:\Users\dave.otis\Desktop\Model_Test\C#_tools\RevitFamilyBuilder\bin\Debug\RevitFamilyBuilder.pdb
+C:\Users\dave.otis\Desktop\Model_Test\C#_tools\RevitFamilyBuilder\bin\Debug\Newtonsoft.Json.dll
+C:\Users\dave.otis\Desktop\Model_Test\C#_tools\RevitFamilyBuilder\obj\Debug\RevitFam.EBCB6301.Up2Date

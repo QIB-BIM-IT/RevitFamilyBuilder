@@ -1,0 +1,229 @@
+﻿<Window x:Class="RevitFamilyBuilder.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Revit Family Builder"
+        Height="720"
+        Width="980"
+        MinHeight="620"
+        MinWidth="820"
+        WindowStartupLocation="CenterScreen"
+        ResizeMode="CanResizeWithGrip"
+        Background="#1E1E1E">
+
+    <Window.Resources>
+
+        <!-- ==================== BOUTON MODERNE ==================== -->
+        <Style x:Key="ModernButton" TargetType="Button">
+            <Setter Property="Background" Value="#0078D4"/>
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Padding" Value="15,8"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Margin" Value="0,0,10,0"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border Background="{TemplateBinding Background}"
+                                CornerRadius="4"
+                                Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center"
+                                              VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter Property="Background" Value="#1084D9"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter Property="Background" Value="#006CBE"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Background" Value="#3E3E3E"/>
+                                <Setter Property="Foreground" Value="#666666"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- ==================== CARD ==================== -->
+        <Style x:Key="SectionCard" TargetType="Border">
+            <Setter Property="Background" Value="#2D2D2D"/>
+            <Setter Property="BorderBrush" Value="#3E3E3E"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="CornerRadius" Value="8"/>
+            <Setter Property="Padding" Value="15"/>
+            <Setter Property="Margin" Value="0,0,0,12"/>
+        </Style>
+
+        <!-- ==================== TEXTBOX STANDARD ==================== -->
+        <Style x:Key="BaseTextBox" TargetType="TextBox">
+            <Setter Property="Background" Value="#383838"/>
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="BorderBrush" Value="#3E3E3E"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding" Value="8,6"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="CaretBrush" Value="White"/>
+        </Style>
+
+        <!-- ==================== PROMPT ==================== -->
+        <Style x:Key="PromptTextBoxStyle" TargetType="TextBox" BasedOn="{StaticResource BaseTextBox}">
+            <Setter Property="AcceptsReturn" Value="True"/>
+            <Setter Property="TextWrapping" Value="Wrap"/>
+            <Setter Property="VerticalScrollBarVisibility" Value="Auto"/>
+            <Setter Property="HorizontalScrollBarVisibility" Value="Disabled"/>
+        </Style>
+
+        <!-- ==================== PATH IMAGE ==================== -->
+        <Style x:Key="ImagePathTextBoxStyle" TargetType="TextBox" BasedOn="{StaticResource BaseTextBox}">
+            <Setter Property="IsReadOnly" Value="True"/>
+            <Setter Property="AcceptsReturn" Value="False"/>
+            <Setter Property="TextWrapping" Value="NoWrap"/>
+            <Setter Property="VerticalContentAlignment" Value="Center"/>
+            <Setter Property="VerticalScrollBarVisibility" Value="Hidden"/>
+            <Setter Property="HorizontalScrollBarVisibility" Value="Hidden"/>
+        </Style>
+
+        <!-- ==================== JSON VIEWER ==================== -->
+        <Style x:Key="JsonViewerTextBoxStyle" TargetType="TextBox" BasedOn="{StaticResource BaseTextBox}">
+            <Setter Property="IsReadOnly" Value="True"/>
+            <Setter Property="AcceptsReturn" Value="True"/>
+            <Setter Property="TextWrapping" Value="NoWrap"/>
+            <Setter Property="VerticalScrollBarVisibility" Value="Visible"/>
+            <Setter Property="HorizontalScrollBarVisibility" Value="Visible"/>
+            <Setter Property="FontFamily" Value="Consolas"/>
+            <Setter Property="FontSize" Value="13"/>
+        </Style>
+
+        <Style TargetType="TextBlock">
+            <Setter Property="Foreground" Value="White"/>
+        </Style>
+
+    </Window.Resources>
+
+    <Grid Margin="20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- ==================== HEADER ==================== -->
+        <StackPanel Grid.Row="0" Margin="0,0,0,15">
+            <TextBlock Text="🧩 Revit Family Builder"
+                       FontSize="22"
+                       FontWeight="Bold"/>
+            <TextBlock Text="Prototype v1 - Prompt vers JSON vers famille Revit"
+                       Foreground="#999999"
+                       FontSize="13"
+                       Margin="0,5,0,0"/>
+        </StackPanel>
+
+        <!-- ==================== PROMPT ==================== -->
+        <Border Grid.Row="1" Style="{StaticResource SectionCard}">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+
+                <TextBlock Grid.Row="0"
+                           Text="Prompt utilisateur"
+                           FontWeight="SemiBold"
+                           Margin="0,0,0,8"/>
+
+                <TextBox x:Name="PromptTextBox"
+                         Grid.Row="1"
+                         Style="{StaticResource PromptTextBoxStyle}"
+                         Height="120"/>
+            </Grid>
+        </Border>
+
+        <!-- ==================== IMAGE ==================== -->
+        <Border Grid.Row="2" Style="{StaticResource SectionCard}">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+
+                <TextBox x:Name="ImagePathTextBox"
+                         Grid.Column="0"
+                         Style="{StaticResource ImagePathTextBoxStyle}"
+                         Height="32"
+                         Margin="0,0,10,0"/>
+
+                <Button Grid.Column="1"
+                        Content="Choisir une image"
+                        Style="{StaticResource ModernButton}"
+                        Width="150"
+                        Height="32"
+                        Margin="0"
+                        Click="BrowseImageButton_Click"/>
+            </Grid>
+        </Border>
+
+        <!-- ==================== JSON PREVIEW ==================== -->
+        <Border Grid.Row="3" Style="{StaticResource SectionCard}">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+
+                <TextBlock Grid.Row="0"
+                           Text="JSON Preview"
+                           FontWeight="SemiBold"
+                           Margin="0,0,0,8"/>
+
+                <TextBox x:Name="JsonPreviewTextBox"
+                         Grid.Row="1"
+                         Style="{StaticResource JsonViewerTextBoxStyle}"
+                         VerticalAlignment="Stretch"
+                         HorizontalAlignment="Stretch"/>
+            </Grid>
+        </Border>
+
+        <!-- ==================== FOOTER ==================== -->
+        <Grid Grid.Row="4" Margin="0,10,0,0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+
+            <TextBlock x:Name="StatusTextBlock"
+                       Grid.Column="0"
+                       VerticalAlignment="Center"
+                       Foreground="#999999"
+                       Text="Prêt."/>
+
+            <Button Grid.Column="1"
+                    Content="Generate JSON"
+                    Style="{StaticResource ModernButton}"
+                    Width="120"
+                    Height="32"
+                    Click="GenerateJsonButton_Click"/>
+
+            <Button Grid.Column="2"
+                    Content="Validate JSON"
+                    Style="{StaticResource ModernButton}"
+                    Width="120"
+                    Height="32"
+                    Click="ValidateJsonButton_Click"/>
+
+            <Button Grid.Column="3"
+                    Content="Build Family"
+                    Style="{StaticResource ModernButton}"
+                    Width="120"
+                    Height="32"
+                    Margin="0"
+                    Click="BuildFamilyButton_Click"/>
+        </Grid>
+    </Grid>
+</Window>
