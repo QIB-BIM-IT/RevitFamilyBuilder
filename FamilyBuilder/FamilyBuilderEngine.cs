@@ -1298,9 +1298,9 @@ namespace RevitFamilyBuilder.FamilyBuilder
         // pipeline are correct.  It performs three categories of checks:
         //
         //  A) Pre-flex structural checks (before changing any value):
-        //     • Every expected labelled dimension must exist (Width, Depth, Height
-        //       must each have at least one Dimension whose FamilyLabel matches).
-        //     • The extrusion's EXTRUSION_END_PARAM must be associated with Height.
+        //     • Width and Depth must each have a labelled Dimension in the plan view.
+        //     • Height must be driven by EXTRUSION_END_PARAM association (not by a
+        //       labelled dimension — Revit cannot label Z-normal plane dimensions).
         //
         //  B) Flex passes (×1.5 and ×0.7 of baseline):
         //     • Set parameter values, Regenerate, capture Revit failure messages
@@ -1324,8 +1324,12 @@ namespace RevitFamilyBuilder.FamilyBuilder
 
             // ── A) Pre-flex structural checks ─────────────────────────────────────
 
-            // A1. Verify labelled dimensions exist for Width, Depth, Height.
-            var expectedLabels = new[] { "Width", "Depth", "Height" };
+            // A1. Verify labelled dimensions exist for Width and Depth.
+            //     Height is NOT constrained via a labelled dimension (Revit cannot
+            //     label dimensions between Z-normal planes via the API).  It is
+            //     constrained instead by EXTRUSION_END_PARAM association — checked
+            //     separately in A2 below.
+            var expectedLabels = new[] { "Width", "Depth" };
             var labelledDims = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
             foreach (string name in expectedLabels)
                 labelledDims[name] = false;
@@ -1355,7 +1359,9 @@ namespace RevitFamilyBuilder.FamilyBuilder
                 }
             }
 
-            // A2. Verify extrusion height association.
+            // A2. Verify extrusion exists and Height is driven by parameter association.
+            //     The standard Revit pattern for parametric height: associate
+            //     EXTRUSION_END_PARAM to the "Height" family parameter.
             var solidExtrusions = new FilteredElementCollector(familyDoc)
                 .OfClass(typeof(Extrusion))
                 .Cast<Extrusion>()
