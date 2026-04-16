@@ -2335,12 +2335,13 @@ namespace RevitFamilyBuilder.FamilyBuilder
                 FamilyParameter fp;
                 if (!paramsByName.TryGetValue(colName, out fp)) continue;
                 if (fp.IsInstance) continue; // size_lookup only works on type params
+                if (fp.IsDeterminedByFormula) continue; // already driven by another formula
 
                 double defaultMm = defaults.ContainsKey(colName) ? defaults[colName] : 600;
                 string formula =
                     "size_lookup(\""
                     + tableName + "\", \""
-                    + colName + "\", "
+                    + colName + "##LENGTH##MILLIMETERS\", "
                     + defaultMm.ToString("0", System.Globalization.CultureInfo.InvariantCulture)
                     + " mm, LookupKey)";
 
