@@ -652,6 +652,30 @@ namespace RevitFamilyBuilder.FamilyBuilder
             {
                 tx.Start();
 
+                // FamilyLabel assignment requires an active family type.
+                // If none exists yet, seed one so label attempts don't trigger
+                // Revit modal errors on some templates.
+                if (familyDoc.FamilyManager.CurrentType == null)
+                {
+                    string seedTypeName = "Default";
+                    if (definition.Types != null)
+                    {
+                        FamilyTypeDefinition firstNamedType = definition.Types
+                            .FirstOrDefault(t => t != null && !string.IsNullOrWhiteSpace(t.Name));
+                        if (firstNamedType != null)
+                            seedTypeName = firstNamedType.Name.Trim();
+                    }
+
+                    try
+                    {
+                        familyDoc.FamilyManager.NewType(seedTypeName);
+                    }
+                    catch (Exception ex)
+                    {
+                        warnings.Add("Could not create seed family type for dimension labels: " + ex.Message);
+                    }
+                }
+
                 foreach (DimensionDefinition dimDef in definition.Dimensions)
                 {
                     if (string.IsNullOrWhiteSpace(dimDef.ReferencePlane1)
@@ -742,6 +766,18 @@ namespace RevitFamilyBuilder.FamilyBuilder
                                     + "\" DimBetween=\"" + dimDef.ReferencePlane1
                                     + "\" and \"" + dimDef.ReferencePlane2 + "\"");
 
+                                // Reject parameter/label combinations that Revit cannot bind.
+                                bool parameterIsLength = fp.Definition != null
+                                    && fp.Definition.GetDataType() != null
+                                    && fp.Definition.GetDataType().Equals(SpecTypeId.Length);
+                                bool parameterCanDriveDimension =
+                                       familyDoc.FamilyManager.CurrentType != null
+                                    && !fp.IsReadOnly
+                                    && !fp.IsReporting
+                                    && !fp.IsDeterminedByFormula
+                                    && fp.StorageType == StorageType.Double
+                                    && parameterIsLength;
+
                                 // Revit label support is stricter than dimension creation:
                                 // only simple linear dimensions (2 references, single segment,
                                 // non-elevation) are reliably labelable via API.
@@ -749,11 +785,18 @@ namespace RevitFamilyBuilder.FamilyBuilder
                                 // "This dimension can not be labeled."
                                 bool hasMiddleRef = rpMiddle != null;
                                 bool isSingleSegment = dim.NumberOfSegments <= 1;
-                                bool canAttemptLabel = !isElevationDim && !hasMiddleRef && isSingleSegment;
+                                bool canAttemptLabel =
+                                       parameterCanDriveDimension
+                                    && !isElevationDim
+                                    && !hasMiddleRef
+                                    && isSingleSegment;
 
                                 if (!canAttemptLabel)
                                 {
-                                    string reason = isElevationDim
+                                    string reason =
+                                        !parameterCanDriveDimension
+                                            ? "parameter not eligible for dimension label"
+                                        : isElevationDim
                                         ? "elevation dimension"
                                         : hasMiddleRef
                                             ? "chained dimension (middle reference)"
