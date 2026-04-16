@@ -742,11 +742,26 @@ namespace RevitFamilyBuilder.FamilyBuilder
                                     + "\" DimBetween=\"" + dimDef.ReferencePlane1
                                     + "\" and \"" + dimDef.ReferencePlane2 + "\"");
 
-                                try { dim.FamilyLabel = fp; }
-                                catch (Exception ex)
+                                // Revit cannot label dimensions between Z-normal
+                                // reference planes in elevation context. Attempting
+                                // to set FamilyLabel there triggers the UI dialog:
+                                // "This dimension can not be labeled."
+                                if (isElevationDim)
                                 {
-                                    warnings.Add("Could not bind parameter \""
-                                        + dimDef.ParameterName + "\": " + ex.Message);
+                                    warnings.Add("Skipped label \"" + dimDef.ParameterName
+                                        + "\" on elevation dimension (\""
+                                        + dimDef.ReferencePlane1 + "\" - \""
+                                        + dimDef.ReferencePlane2
+                                        + "\"): Revit does not support labeling this dimension type.");
+                                }
+                                else
+                                {
+                                    try { dim.FamilyLabel = fp; }
+                                    catch (Exception ex)
+                                    {
+                                        warnings.Add("Could not bind parameter \""
+                                            + dimDef.ParameterName + "\": " + ex.Message);
+                                    }
                                 }
                             }
                             else
