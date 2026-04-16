@@ -742,14 +742,24 @@ namespace RevitFamilyBuilder.FamilyBuilder
                                     + "\" DimBetween=\"" + dimDef.ReferencePlane1
                                     + "\" and \"" + dimDef.ReferencePlane2 + "\"");
 
-                                // Revit cannot label dimensions between Z-normal
-                                // reference planes in elevation context. Attempting
-                                // to set FamilyLabel there triggers the UI dialog:
+                                // Revit label support is stricter than dimension creation:
+                                // only simple linear dimensions (2 references, single segment,
+                                // non-elevation) are reliably labelable via API.
+                                // Unsupported cases can trigger the UI popup:
                                 // "This dimension can not be labeled."
-                                if (isElevationDim)
+                                bool hasMiddleRef = rpMiddle != null;
+                                bool isSingleSegment = dim.NumberOfSegments <= 1;
+                                bool canAttemptLabel = !isElevationDim && !hasMiddleRef && isSingleSegment;
+
+                                if (!canAttemptLabel)
                                 {
+                                    string reason = isElevationDim
+                                        ? "elevation dimension"
+                                        : hasMiddleRef
+                                            ? "chained dimension (middle reference)"
+                                            : "multi-segment dimension";
                                     warnings.Add("Skipped label \"" + dimDef.ParameterName
-                                        + "\" on elevation dimension (\""
+                                        + "\" on unsupported " + reason + " (\""
                                         + dimDef.ReferencePlane1 + "\" - \""
                                         + dimDef.ReferencePlane2
                                         + "\"): Revit does not support labeling this dimension type.");
