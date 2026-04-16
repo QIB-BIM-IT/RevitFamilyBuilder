@@ -650,31 +650,11 @@ namespace RevitFamilyBuilder.FamilyBuilder
 
             using (Transaction tx = new Transaction(familyDoc, "Add Dimensions"))
             {
+                var failOpts = tx.GetFailureHandlingOptions();
+                failOpts.SetFailuresPreprocessor(new SilentDimensionFailuresPreprocessor(warnings));
+                tx.SetFailureHandlingOptions(failOpts);
+
                 tx.Start();
-
-                // FamilyLabel assignment requires an active family type.
-                // If none exists yet, seed one so label attempts don't trigger
-                // Revit modal errors on some templates.
-                if (familyDoc.FamilyManager.CurrentType == null)
-                {
-                    string seedTypeName = "Default";
-                    if (definition.Types != null)
-                    {
-                        FamilyTypeDefinition firstNamedType = definition.Types
-                            .FirstOrDefault(t => t != null && !string.IsNullOrWhiteSpace(t.Name));
-                        if (firstNamedType != null)
-                            seedTypeName = firstNamedType.Name.Trim();
-                    }
-
-                    try
-                    {
-                        familyDoc.FamilyManager.NewType(seedTypeName);
-                    }
-                    catch (Exception ex)
-                    {
-                        warnings.Add("Could not create seed family type for dimension labels: " + ex.Message);
-                    }
-                }
 
                 foreach (DimensionDefinition dimDef in definition.Dimensions)
                 {
@@ -766,55 +746,11 @@ namespace RevitFamilyBuilder.FamilyBuilder
                                     + "\" DimBetween=\"" + dimDef.ReferencePlane1
                                     + "\" and \"" + dimDef.ReferencePlane2 + "\"");
 
-                                // Reject parameter/label combinations that Revit cannot bind.
-                                bool parameterIsLength = fp.Definition != null
-                                    && fp.Definition.GetDataType() != null
-                                    && fp.Definition.GetDataType().Equals(SpecTypeId.Length);
-                                bool parameterCanDriveDimension =
-                                       familyDoc.FamilyManager.CurrentType != null
-                                    && !fp.IsReadOnly
-                                    && !fp.IsReporting
-                                    && !fp.IsDeterminedByFormula
-                                    && fp.StorageType == StorageType.Double
-                                    && parameterIsLength;
-
-                                // Revit label support is stricter than dimension creation:
-                                // only simple linear dimensions (2 references, single segment,
-                                // non-elevation) are reliably labelable via API.
-                                // Unsupported cases can trigger the UI popup:
-                                // "This dimension can not be labeled."
-                                bool hasMiddleRef = rpMiddle != null;
-                                bool isSingleSegment = dim.NumberOfSegments <= 1;
-                                bool canAttemptLabel =
-                                       parameterCanDriveDimension
-                                    && !isElevationDim
-                                    && !hasMiddleRef
-                                    && isSingleSegment;
-
-                                if (!canAttemptLabel)
+                                try { dim.FamilyLabel = fp; }
+                                catch (Exception ex)
                                 {
-                                    string reason =
-                                        !parameterCanDriveDimension
-                                            ? "parameter not eligible for dimension label"
-                                        : isElevationDim
-                                        ? "elevation dimension"
-                                        : hasMiddleRef
-                                            ? "chained dimension (middle reference)"
-                                            : "multi-segment dimension";
-                                    warnings.Add("Skipped label \"" + dimDef.ParameterName
-                                        + "\" on unsupported " + reason + " (\""
-                                        + dimDef.ReferencePlane1 + "\" - \""
-                                        + dimDef.ReferencePlane2
-                                        + "\"): Revit does not support labeling this dimension type.");
-                                }
-                                else
-                                {
-                                    try { dim.FamilyLabel = fp; }
-                                    catch (Exception ex)
-                                    {
-                                        warnings.Add("Could not bind parameter \""
-                                            + dimDef.ParameterName + "\": " + ex.Message);
-                                    }
+                                    warnings.Add("Could not bind parameter \""
+                                        + dimDef.ParameterName + "\": " + ex.Message);
                                 }
                             }
                             else
@@ -1565,6 +1501,31 @@ namespace RevitFamilyBuilder.FamilyBuilder
 
         // ── Failures preprocessor for flex passes ─────────────────────────────────
         // Captures Revit warning/error messages during Regenerate() inside a
+        // Silently absorbs any Revit failures raised during AddDimensions so that
+        // modal error dialogs like "This dimension can not be labeled" are never
+        // displayed to the user.  Captured messages are appended to warnings.
+        private class SilentDimensionFailuresPreprocessor : IFailuresPreprocessor
+        {
+            private readonly IList<string> _warnings;
+
+            public SilentDimensionFailuresPreprocessor(IList<string> warnings)
+            {
+                _warnings = warnings;
+            }
+
+            public FailureProcessingResult PreprocessFailures(FailuresAccessor accessor)
+            {
+                IList<FailureMessageAccessor> failures = accessor.GetFailureMessages();
+                foreach (FailureMessageAccessor fma in failures)
+                {
+                    _warnings.Add("Dimension warning: " + fma.GetDescriptionText());
+                    if (fma.GetSeverity() == FailureSeverity.Warning)
+                        accessor.DeleteWarning(fma);
+                }
+                return FailureProcessingResult.Continue;
+            }
+        }
+
         // transaction so FlexTest can report them.  All failures are continued
         // (not rolled back) to let the pass finish before we decide pass/fail.
         private class FlexFailuresPreprocessor : IFailuresPreprocessor
