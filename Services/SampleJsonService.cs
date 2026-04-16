@@ -28,11 +28,10 @@ namespace RevitFamilyBuilder.Services
         {
             return new FamilyDefinition
             {
-                SchemaVersion  = "1.0",
-                FamilyName     = "Generic_Box",
+                SchemaVersion = "1.0",
+                FamilyName    = "Generic_Box",
                 FamilyTemplate = "GenericModelMetric",
                 Category       = "Generic Models",
-                BuildStrategy  = "lookup_table",
 
                 // ── Parameters ──────────────────────────────────────────────────
                 // All dimensional parameters are type parameters (IsInstance = false)
@@ -51,11 +50,9 @@ namespace RevitFamilyBuilder.Services
                 // Lateral planes (Left/Right/Front/Back) use "vertical" or "horizontal"
                 // orientation and live in the plan view (X-normal or Y-normal planes).
                 //
-                // Height is NOT constrained via reference planes.  Instead, the engine
-                // associates the extrusion's EXTRUSION_END_PARAM directly with the
-                // "Height" family parameter.  This is the standard Revit pattern and
-                // avoids the "dimension can not be labeled" error that occurs when
-                // trying to label dimensions between Z-normal planes in elevation view.
+                // Elevation planes (Base/Top) use "elevation" orientation, which creates
+                // Z-normal planes visible in the front-elevation view.  These are the
+                // ONLY planes that can correctly constrain the extrusion top/bottom faces.
                 //
                 // Centre planes at offset 0 are used for EQ symmetry dimensions below.
                 ReferencePlanes = new List<ReferencePlaneDefinition>
@@ -68,19 +65,18 @@ namespace RevitFamilyBuilder.Services
                     new ReferencePlaneDefinition { Name = "Left",  Orientation = "vertical",   Offset = -300.0 },
                     new ReferencePlaneDefinition { Name = "Right", Orientation = "vertical",   Offset =  300.0 },
                     new ReferencePlaneDefinition { Name = "Front", Orientation = "horizontal", Offset = -200.0 },
-                    new ReferencePlaneDefinition { Name = "Back",  Orientation = "horizontal", Offset =  200.0 }
+                    new ReferencePlaneDefinition { Name = "Back",  Orientation = "horizontal", Offset =  200.0 },
+
+                    // Elevation planes (Z-normal) — REQUIRED for height flex to work.
+                    // "elevation" orientation creates planes with normal (0,0,1) at the
+                    // given Z offset.  Without this, the extrusion top/bottom faces
+                    // cannot be locked and Height will not drive the geometry.
+                    new ReferencePlaneDefinition { Name = "Base", Orientation = "elevation", Offset =   0.0 },
+                    new ReferencePlaneDefinition { Name = "Top",  Orientation = "elevation", Offset = 300.0 }
                 },
 
                 // ── Dimensions ──────────────────────────────────────────────────
-                // Width and Depth are driven by labelled dimensions between reference
-                // planes in the plan view (the standard Revit family pattern).
-                //
-                // Height is NOT driven by a labelled dimension.  Revit does not allow
-                // labelling dimensions between Z-normal planes in the elevation view
-                // via the API ("This dimension can not be labeled").  Instead, Height
-                // is constrained by associating the extrusion's EXTRUSION_END_PARAM
-                // directly with the Height family parameter (done in AddGeometry).
-                //
+                // Three labelled dimensions drive Width, Depth, Height parameters.
                 // Two additional EQ dimensions lock the centre planes to the midpoints,
                 // ensuring Left-Right and Front-Back symmetry around the origin.
                 //
@@ -93,6 +89,7 @@ namespace RevitFamilyBuilder.Services
                     // Labelled driving dimensions.
                     new DimensionDefinition { ReferencePlane1 = "Left",  ReferencePlane2 = "Right", ParameterName = "Width"  },
                     new DimensionDefinition { ReferencePlane1 = "Front", ReferencePlane2 = "Back",  ParameterName = "Depth"  },
+                    new DimensionDefinition { ReferencePlane1 = "Base",  ReferencePlane2 = "Top",   ParameterName = "Height" },
 
                     // EQ symmetry constraints — no parameter label, only constraint.
                     new DimensionDefinition { ReferencePlane1 = "Left",  ReferencePlaneMiddle = "Center_LR", ReferencePlane2 = "Right", IsEqual = true },
@@ -112,10 +109,7 @@ namespace RevitFamilyBuilder.Services
 
                 // ── Geometry ────────────────────────────────────────────────────
                 // A single rectangular extrusion built by BuildRectangularExtrusion.
-                // The 4 lateral faces are locked to Left/Right/Front/Back reference
-                // planes via NewAlignment in the plan view.
-                // The extrusion height is driven by associating EXTRUSION_END_PARAM
-                // directly with the "Height" family parameter (sketch plane at Z = 0).
+                // All six faces are automatically locked to the six named reference planes.
                 //
                 // "symmetry" declares the axes on which the AI intends symmetry.
                 // The actual EQ constraints come from the "dimensions" entries above;
@@ -204,10 +198,7 @@ namespace RevitFamilyBuilder.Services
                 {
                     "Sample JSON only — not generated by AI.",
                     "Height is formula-driven (Width / 2); FlexTest will skip it when testing directly.",
-                    "Height is constrained via EXTRUSION_END_PARAM association (not by a labelled dimension).",
-                    "EQ dimensions for Center_LR and Center_FB require those planes to exist before AddDimensions runs.",
-                    "BuildStrategy = lookup_table exercises LookupKey parameter, CSV export, embed, and size_lookup formulas.",
-                    "size_lookup formulas skip Height because it is already formula-driven (Width / 2)."
+                    "EQ dimensions for Center_LR and Center_FB require those planes to exist before AddDimensions runs."
                 }
             };
         }
