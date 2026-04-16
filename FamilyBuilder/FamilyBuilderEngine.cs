@@ -1511,15 +1511,18 @@ namespace RevitFamilyBuilder.FamilyBuilder
             if (definition.Connectors == null || definition.Connectors.Count == 0)
                 return 0;
 
-            // Collect all extrusions — connectors need a planar face reference.
+            // Collect all SOLID extrusions — voids do not expose the expected
+            // faces (e.g. a frontal void has no "Back" face) and must never be
+            // chosen as the connector host.
             var extrusions = new FilteredElementCollector(familyDoc)
                 .OfClass(typeof(Extrusion))
                 .Cast<Extrusion>()
+                .Where(e => e.IsSolid)
                 .ToList();
 
             if (extrusions.Count == 0)
             {
-                warnings.Add("Connector skipped: no extrusion found to host the connector.");
+                warnings.Add("Connector skipped: no solid extrusion found to host the connector.");
                 return 0;
             }
 
