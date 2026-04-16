@@ -61,8 +61,10 @@ namespace RevitFamilyBuilder.Services
             // Each test is rolled back so the family document is unchanged afterward.
             string flexReport  = _engine.FlexTest(familyDoc, definition, warnings);
 
-            int voidCount      = _engine.AddVoids(familyDoc, definition, warnings);
+            // Connectors must be placed before voids — a "Through" void
+            // destroys the planar face that the connector needs as host.
             int connectorCount = _engine.AddConnectors(familyDoc, definition, warnings);
+            int voidCount      = _engine.AddVoids(familyDoc, definition, warnings);
 
             // ── Lookup table setup (before save so the family doc is still open) ──
 
