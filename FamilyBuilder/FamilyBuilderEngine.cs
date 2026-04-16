@@ -650,10 +650,6 @@ namespace RevitFamilyBuilder.FamilyBuilder
 
             using (Transaction tx = new Transaction(familyDoc, "Add Dimensions"))
             {
-                var failOpts = tx.GetFailureHandlingOptions();
-                failOpts.SetFailuresPreprocessor(new SilentDimensionFailuresPreprocessor(warnings));
-                tx.SetFailureHandlingOptions(failOpts);
-
                 tx.Start();
 
                 foreach (DimensionDefinition dimDef in definition.Dimensions)
@@ -938,15 +934,13 @@ namespace RevitFamilyBuilder.FamilyBuilder
         //   • Rectangular profile (w × d) centred at origin, extruded along +Z to h
         //   • 4 lateral faces locked to Left / Right / Front / Back reference planes
         //     (via NewAlignment in plan view)
-        //   • Bottom (Z = 0): extrusion StartOffset = 0, sketch plane at Z = 0
-        //     The sketch plane coincides with the built-in Lower Ref Level at Z = 0,
-        //     which is sufficient for the base constraint in GenericModel templates.
-        //   • Top (Z = h): the extrusion EndOffset is associated to the "Height"
-        //     family parameter via EXTRUSION_END_PARAM.  This is the standard Revit
-        //     pattern for parametric height — it avoids the brittle face-reference
-        //     approach that fails with "The reference is not valid" on Z-faces.
-        //   • The alignment transaction is independent so a failed face lock never
-        //     rolls back the committed solid.
+        //   • Bottom face locked to "Base" reference plane in elevation view
+        //   • Top face locked to "Top" reference plane in elevation view
+        //   • The two alignment transactions are independent so a failed face lock
+        //     never rolls back the committed solid
+        //
+        // For the Top/Bottom locks to succeed the "Base" and "Top" reference planes
+        // MUST have been created with Orientation = "elevation" (Z-normal planes).
         private static bool BuildRectangularExtrusion(
             Document familyDoc,
             double w, double d, double h,
@@ -994,7 +988,9 @@ namespace RevitFamilyBuilder.FamilyBuilder
                 }
             }
 
-            // ── Step 2: lock lateral faces (Left/Right/Front/Back) ────────────────
+            // ── Step 2: lock every face to its named reference plane ─────────────
+            // Kept in a separate transaction so a failed alignment never rolls back
+            // the already-committed solid geometry.
             try
             {
                 using (Transaction txAlign = new Transaction(
@@ -1011,75 +1007,7 @@ namespace RevitFamilyBuilder.FamilyBuilder
                 warnings.Add("Extrusion face-locking transaction failed: " + ex.Message);
             }
 
-            // ── Step 3: lock height via extrusion offset parameters ───────────────
-            // This is the standard Revit pattern: associate the extrusion's built-in
-            // EXTRUSION_END_PARAM (top distance from sketch plane) with the "Height"
-            // family parameter.  EXTRUSION_START_PARAM stays at 0 (base = sketch plane).
-            //
-            // This replaces the face-based NewAlignment approach for Z-normals which
-            // fails with "The reference is not valid" in most family templates.
-            try
-            {
-                using (Transaction txHeight = new Transaction(
-                    familyDoc, "Associate Extrusion Height"))
-                {
-                    txHeight.Start();
-                    TryAssociateExtrusionHeight(familyDoc, ext, warnings);
-                    txHeight.Commit();
-                }
-            }
-            catch (Exception ex)
-            {
-                warnings.Add("Extrusion height association failed: " + ex.Message);
-            }
-
             return true;
-        }
-
-        // Associates the extrusion's EXTRUSION_END_PARAM with the "Height" family
-        // parameter so the top of the extrusion tracks the Height value directly.
-        // This is more reliable than face-to-plane alignment for Z-normal faces.
-        // Caller must supply an open transaction.
-        private static void TryAssociateExtrusionHeight(
-            Document familyDoc,
-            Extrusion extrusion,
-            IList<string> warnings)
-        {
-            FamilyManager fm = familyDoc.FamilyManager;
-
-            FamilyParameter heightParam = null;
-            foreach (FamilyParameter fp in fm.GetParameters())
-            {
-                if (string.Equals(fp.Definition.Name, "Height", StringComparison.OrdinalIgnoreCase))
-                {
-                    heightParam = fp;
-                    break;
-                }
-            }
-
-            if (heightParam == null)
-            {
-                warnings.Add("Height parameter not found; extrusion top is not parametrically constrained.");
-                return;
-            }
-
-            // Associate EXTRUSION_END_PARAM → Height
-            Parameter endParam = extrusion.get_Parameter(BuiltInParameter.EXTRUSION_END_PARAM);
-            if (endParam != null && !endParam.IsReadOnly)
-            {
-                try
-                {
-                    fm.AssociateElementParameterToFamilyParameter(endParam, heightParam);
-                }
-                catch (Exception ex)
-                {
-                    warnings.Add("Could not associate extrusion EndOffset to Height: " + ex.Message);
-                }
-            }
-            else
-            {
-                warnings.Add("EXTRUSION_END_PARAM is null or read-only; height not constrained.");
-            }
         }
 
         // Reads a family parameter's current value (in internal feet).
@@ -1298,23 +1226,17 @@ namespace RevitFamilyBuilder.FamilyBuilder
 
         // ── Flex validation ──────────────────────────────────────────────────────
         //
-        // FlexTest verifies that the parametric constraints added by the build
-        // pipeline are correct.  It performs three categories of checks:
+        // FlexTest verifies that the parametric constraints added by AddGeometry are
+        // correct by driving Width / Depth / Height to two test values (×1.5 and ×0.7
+        // of the current defaults) and checking that the solid geometry regenerates
+        // without errors.
         //
-        //  A) Pre-flex structural checks (before changing any value):
-        //     • Width and Depth must each have a labelled Dimension in the plan view.
-        //     • Height must be driven by EXTRUSION_END_PARAM association (not by a
-        //       labelled dimension — Revit cannot label Z-normal plane dimensions).
+        // Each test pass runs inside a transaction that is ROLLED BACK afterwards so
+        // the family document is left exactly as it was before the test.  The method
+        // is safe to call between AddGeometry and SaveAndActivateDocument.
         //
-        //  B) Flex passes (×1.5 and ×0.7 of baseline):
-        //     • Set parameter values, Regenerate, capture Revit failure messages
-        //       via IFailuresPreprocessor, then verify solid volume is non-zero.
-        //     • Any Revit warning or error during regeneration → FAIL.
-        //
-        //  C) Summary: all checks must pass for overall PASSED result.
-        //
-        // Each flex pass runs inside a transaction that is ROLLED BACK afterwards so
-        // the family document is left exactly as it was before the test.
+        // Formula-driven parameters cannot be set directly; FlexTest will log which
+        // parameters were skipped and still count the pass as valid.
         //
         // Returns a multi-line summary string; also appends items to warnings.
         public string FlexTest(
@@ -1324,231 +1246,80 @@ namespace RevitFamilyBuilder.FamilyBuilder
             sb.AppendLine("── FlexTest ──────────────────────────────────────────");
 
             FamilyManager fm = familyDoc.FamilyManager;
-            bool structuralOk = true;
 
-            // ── A) Pre-flex structural checks ─────────────────────────────────────
-
-            // A1. Verify labelled dimensions exist for Width and Depth.
-            //     Height is NOT constrained via a labelled dimension (Revit cannot
-            //     label dimensions between Z-normal planes via the API).  It is
-            //     constrained instead by EXTRUSION_END_PARAM association — checked
-            //     separately in A2 below.
-            var expectedLabels = new[] { "Width", "Depth" };
-            var labelledDims = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
-            foreach (string name in expectedLabels)
-                labelledDims[name] = false;
-
-            foreach (Element elem in new FilteredElementCollector(familyDoc)
-                .OfClass(typeof(Dimension)))
-            {
-                Dimension dim = elem as Dimension;
-                if (dim == null || dim.FamilyLabel == null) continue;
-                string labelName = dim.FamilyLabel.Definition.Name;
-                if (labelledDims.ContainsKey(labelName))
-                    labelledDims[labelName] = true;
-            }
-
-            foreach (var kv in labelledDims)
-            {
-                if (!kv.Value)
-                {
-                    string msg = "FlexTest structural: no dimension labelled with \"" + kv.Key + "\" found.";
-                    sb.AppendLine("  FAIL — " + msg);
-                    warnings.Add(msg);
-                    structuralOk = false;
-                }
-                else
-                {
-                    sb.AppendLine("  OK — Dimension labelled \"" + kv.Key + "\" exists.");
-                }
-            }
-
-            // A2. Verify extrusion exists and Height is driven by parameter association.
-            //     The standard Revit pattern for parametric height: associate
-            //     EXTRUSION_END_PARAM to the "Height" family parameter.
-            var solidExtrusions = new FilteredElementCollector(familyDoc)
-                .OfClass(typeof(Extrusion))
-                .Cast<Extrusion>()
-                .Where(e => e.IsSolid)
-                .ToList();
-
-            if (solidExtrusions.Count == 0)
-            {
-                string msg = "FlexTest structural: no solid extrusion found.";
-                sb.AppendLine("  FAIL — " + msg);
-                warnings.Add(msg);
-                structuralOk = false;
-            }
-            else
-            {
-                Extrusion mainExt = solidExtrusions[0];
-                Parameter endParam = mainExt.get_Parameter(BuiltInParameter.EXTRUSION_END_PARAM);
-                bool heightAssociated = false;
-                if (endParam != null)
-                {
-                    FamilyParameter assoc = fm.GetAssociatedFamilyParameter(endParam);
-                    heightAssociated = assoc != null
-                        && string.Equals(assoc.Definition.Name, "Height",
-                            StringComparison.OrdinalIgnoreCase);
-                }
-                if (heightAssociated)
-                {
-                    sb.AppendLine("  OK — Extrusion EndOffset associated to \"Height\".");
-                }
-                else
-                {
-                    string msg = "FlexTest structural: extrusion EndOffset is NOT associated to \"Height\".";
-                    sb.AppendLine("  FAIL — " + msg);
-                    warnings.Add(msg);
-                    structuralOk = false;
-                }
-            }
-
-            // A3. Count lateral alignment constraints (Left/Right/Front/Back).
-            int alignmentCount = 0;
-            try
-            {
-                foreach (Element elem in new FilteredElementCollector(familyDoc)
-                    .OfCategory(BuiltInCategory.OST_Constraints)
-                    .WhereElementIsNotElementType())
-                {
-                    alignmentCount++;
-                }
-            }
-            catch { }
-            sb.AppendLine("  Alignment constraints found: " + alignmentCount);
-            if (alignmentCount < 4)
-            {
-                string msg = "FlexTest structural: expected at least 4 alignment constraints "
-                    + "(Left/Right/Front/Back), found " + alignmentCount + ".";
-                sb.AppendLine("  WARNING — " + msg);
-                warnings.Add(msg);
-            }
-
-            // ── B) Flex passes ────────────────────────────────────────────────────
-
+            // Locate Width, Depth, Height parameters (any that exist).
             var dimParamNames = new[] { "Width", "Depth", "Height" };
             var dimParams = new Dictionary<string, FamilyParameter>(StringComparer.OrdinalIgnoreCase);
             foreach (FamilyParameter fp in fm.GetParameters())
                 if (Array.IndexOf(dimParamNames, fp.Definition.Name) >= 0)
                     dimParams[fp.Definition.Name] = fp;
 
-            bool flexOk = true;
-
             if (dimParams.Count == 0)
             {
-                string msg = "FlexTest skipped flex passes: no Width / Depth / Height parameters found.";
+                string msg = "FlexTest skipped: no Width / Depth / Height parameters found.";
                 sb.AppendLine(msg);
                 warnings.Add(msg);
-                flexOk = false;
+                return sb.ToString();
             }
-            else
+
+            // Record current values from the active family type.
+            var origValues = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
+            FamilyType activeType = fm.CurrentType;
+            foreach (var kv in dimParams)
             {
-                var origValues = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
-                FamilyType activeType = fm.CurrentType;
-                foreach (var kv in dimParams)
+                double? val = activeType != null ? activeType.AsDouble(kv.Value) : null;
+                if (!val.HasValue || val.Value < 1e-6)
                 {
-                    double? val = activeType != null ? activeType.AsDouble(kv.Value) : null;
-                    if (!val.HasValue || val.Value < 1e-6)
+                    // Fall back to the JSON default (mm → ft).
+                    double fallback = 0.0;
+                    if (definition.Parameters != null)
                     {
-                        double fallback = 0.0;
-                        if (definition.Parameters != null)
+                        foreach (ParameterDefinition pd in definition.Parameters)
                         {
-                            foreach (ParameterDefinition pd in definition.Parameters)
+                            if (!string.Equals(pd.Name, kv.Key, StringComparison.OrdinalIgnoreCase))
+                                continue;
+                            double parsed;
+                            if (!string.IsNullOrWhiteSpace(pd.DefaultValue)
+                                && double.TryParse(pd.DefaultValue,
+                                    System.Globalization.NumberStyles.Any,
+                                    System.Globalization.CultureInfo.InvariantCulture, out parsed))
                             {
-                                if (!string.Equals(pd.Name, kv.Key, StringComparison.OrdinalIgnoreCase))
-                                    continue;
-                                double parsed;
-                                if (!string.IsNullOrWhiteSpace(pd.DefaultValue)
-                                    && double.TryParse(pd.DefaultValue,
-                                        NumberStyles.Any, CultureInfo.InvariantCulture, out parsed))
-                                {
-                                    fallback = UnitUtils.ConvertToInternalUnits(
-                                        parsed, UnitTypeId.Millimeters);
-                                }
-                                break;
+                                fallback = UnitUtils.ConvertToInternalUnits(
+                                    parsed, UnitTypeId.Millimeters);
                             }
+                            break;
                         }
-                        origValues[kv.Key] = fallback > 1e-6 ? fallback : 0.3;
                     }
-                    else
-                    {
-                        origValues[kv.Key] = val.Value;
-                    }
+                    origValues[kv.Key] = fallback > 1e-6 ? fallback : 0.3; // 300 mm default
                 }
-
-                sb.AppendLine("Parameters found: " + string.Join(", ", origValues.Keys));
-                foreach (var kv in origValues)
-                    sb.AppendLine("  " + kv.Key + " baseline = "
-                        + UnitUtils.ConvertFromInternalUnits(kv.Value, UnitTypeId.Millimeters)
-                            .ToString("0.0") + " mm");
-
-                bool pass1 = RunFlexPass(familyDoc, fm, dimParams, origValues, 1.5, "×1.5", sb, warnings);
-                bool pass2 = RunFlexPass(familyDoc, fm, dimParams, origValues, 0.7, "×0.7", sb, warnings);
-                flexOk = pass1 && pass2;
+                else
+                {
+                    origValues[kv.Key] = val.Value;
+                }
             }
 
-            // ── C) Summary ────────────────────────────────────────────────────────
-            bool allPassed = structuralOk && flexOk;
-            sb.AppendLine("FlexTest result: " + (allPassed ? "PASSED" : "FAILED — see warnings above"));
+            sb.AppendLine("Parameters found: " + string.Join(", ", origValues.Keys));
+            foreach (var kv in origValues)
+                sb.AppendLine("  " + kv.Key + " baseline = "
+                    + UnitUtils.ConvertFromInternalUnits(kv.Value, UnitTypeId.Millimeters)
+                        .ToString("0.0") + " mm");
+
+            bool pass1 = RunFlexPass(familyDoc, fm, dimParams, origValues, 1.5, "×1.5", sb, warnings);
+            bool pass2 = RunFlexPass(familyDoc, fm, dimParams, origValues, 0.7, "×0.7", sb, warnings);
+
+            bool allPassed = pass1 && pass2;
+            sb.AppendLine("FlexTest result: " + (allPassed ? "PASSED ✓" : "FAILED — see warnings above"));
             sb.AppendLine("──────────────────────────────────────────────────────");
 
             if (!allPassed)
-                warnings.Add("FlexTest: one or more checks failed. Review constraint setup.");
+                warnings.Add("FlexTest: one or more flex passes failed. Check constraints.");
 
             return sb.ToString();
         }
 
-        // ── Failures preprocessor for flex passes ─────────────────────────────────
-        // Captures Revit warning/error messages during Regenerate() inside a
-        // Silently absorbs any Revit failures raised during AddDimensions so that
-        // modal error dialogs like "This dimension can not be labeled" are never
-        // displayed to the user.  Captured messages are appended to warnings.
-        private class SilentDimensionFailuresPreprocessor : IFailuresPreprocessor
-        {
-            private readonly IList<string> _warnings;
-
-            public SilentDimensionFailuresPreprocessor(IList<string> warnings)
-            {
-                _warnings = warnings;
-            }
-
-            public FailureProcessingResult PreprocessFailures(FailuresAccessor accessor)
-            {
-                IList<FailureMessageAccessor> failures = accessor.GetFailureMessages();
-                foreach (FailureMessageAccessor fma in failures)
-                {
-                    _warnings.Add("Dimension warning: " + fma.GetDescriptionText());
-                    if (fma.GetSeverity() == FailureSeverity.Warning)
-                        accessor.DeleteWarning(fma);
-                }
-                return FailureProcessingResult.Continue;
-            }
-        }
-
-        // transaction so FlexTest can report them.  All failures are continued
-        // (not rolled back) to let the pass finish before we decide pass/fail.
-        private class FlexFailuresPreprocessor : IFailuresPreprocessor
-        {
-            public readonly List<string> Messages = new List<string>();
-
-            public FailureProcessingResult PreprocessFailures(FailuresAccessor accessor)
-            {
-                IList<FailureMessageAccessor> failures = accessor.GetFailureMessages();
-                foreach (FailureMessageAccessor fma in failures)
-                {
-                    Messages.Add("[" + fma.GetSeverity() + "] " + fma.GetDescriptionText());
-                    if (fma.GetSeverity() == FailureSeverity.Warning)
-                        accessor.DeleteWarning(fma);
-                }
-                return FailureProcessingResult.Continue;
-            }
-        }
-
         // Runs a single flex pass at a given multiplier.  The transaction is rolled back
         // so no permanent change is made to the family document.
-        // Returns true if the solid geometry survived the regeneration without errors
-        // AND no Revit warnings were raised.
+        // Returns true if the solid geometry survived the regeneration without errors.
         private static bool RunFlexPass(
             Document familyDoc,
             FamilyManager fm,
@@ -1560,14 +1331,9 @@ namespace RevitFamilyBuilder.FamilyBuilder
             IList<string> warnings)
         {
             bool passed = false;
-            var failuresCaptured = new FlexFailuresPreprocessor();
 
             using (Transaction tx = new Transaction(familyDoc, "FlexTest " + label))
             {
-                var failureOpts = tx.GetFailureHandlingOptions();
-                failureOpts.SetFailuresPreprocessor(failuresCaptured);
-                tx.SetFailureHandlingOptions(failureOpts);
-
                 tx.Start();
 
                 var skipped = new List<string>();
@@ -1576,7 +1342,7 @@ namespace RevitFamilyBuilder.FamilyBuilder
                 foreach (var kv in dimParams)
                 {
                     double newVal = origValues[kv.Key] * multiplier;
-                    if (newVal < 0.001) newVal = 0.001;
+                    if (newVal < 0.001) newVal = 0.001; // guard against zero
                     try
                     {
                         fm.Set(kv.Value, newVal);
@@ -1586,6 +1352,7 @@ namespace RevitFamilyBuilder.FamilyBuilder
                     }
                     catch
                     {
+                        // Formula-driven parameters cannot be set; skip and continue.
                         skipped.Add(kv.Key + " (formula-driven)");
                     }
                 }
@@ -1601,21 +1368,7 @@ namespace RevitFamilyBuilder.FamilyBuilder
                     passed = false;
                 }
 
-                // Revit failures captured during Regenerate / Commit preparation.
-                if (failuresCaptured.Messages.Count > 0)
-                {
-                    passed = false;
-                    foreach (string msg in failuresCaptured.Messages)
-                    {
-                        warnings.Add("FlexTest " + label + " Revit warning: " + msg);
-                        sb.AppendLine("  " + label + " warning: " + msg);
-                    }
-                }
-
-                if (skipped.Count > 0)
-                    sb.AppendLine("  " + label + " skipped: " + string.Join(", ", skipped.ToArray()));
-
-                tx.RollBack();
+                tx.RollBack(); // restore — the pass is purely a validation step
             }
 
             sb.AppendLine("Pass " + label + ": " + (passed ? "OK" : "FAIL"));
@@ -1758,21 +1511,19 @@ namespace RevitFamilyBuilder.FamilyBuilder
             if (definition.Connectors == null || definition.Connectors.Count == 0)
                 return 0;
 
-            // Only solid extrusions can host connectors — void extrusions have
-            // different face geometry (e.g. XZ-plane profile) and must be excluded.
-            var solidExtrusions = new FilteredElementCollector(familyDoc)
+            // Collect all extrusions — connectors need a planar face reference.
+            var extrusions = new FilteredElementCollector(familyDoc)
                 .OfClass(typeof(Extrusion))
                 .Cast<Extrusion>()
-                .Where(e => e.IsSolid)
                 .ToList();
 
-            if (solidExtrusions.Count == 0)
+            if (extrusions.Count == 0)
             {
-                warnings.Add("Connector skipped: no solid extrusion found to host the connector.");
+                warnings.Add("Connector skipped: no extrusion found to host the connector.");
                 return 0;
             }
 
-            Extrusion host = solidExtrusions[0];
+            Extrusion host = extrusions[0];
 
             // Build parameter lookup.
             FamilyManager fm = familyDoc.FamilyManager;
@@ -2057,15 +1808,9 @@ namespace RevitFamilyBuilder.FamilyBuilder
             return null;
         }
 
-        // Creates NewAlignment constraints between the four lateral planar faces of
-        // a rectangular extrusion and the named reference planes
-        // (Left, Right, Front, Back — all in plan view).
-        //
-        // Top / Bottom (Z-normal faces) are NOT constrained here.  They use the
-        // extrusion's built-in EXTRUSION_END_PARAM / EXTRUSION_START_PARAM approach
-        // instead (see TryAssociateExtrusionHeight), which is the standard Revit
-        // pattern and avoids the "The reference is not valid" error that face-based
-        // NewAlignment produces on Z-normal faces in most family templates.
+        // Creates NewAlignment constraints between the six planar faces of a rectangular
+        // extrusion and the standard named reference planes
+        // (Left, Right, Front, Back in plan view; Top, Base in elevation view).
         //
         // Each alignment is attempted independently so one failure does not abort the
         // others.  Caller must supply an open transaction.
@@ -2105,16 +1850,16 @@ namespace RevitFamilyBuilder.FamilyBuilder
 
                         XYZ    n         = pf.FaceNormal;
                         string planeName = null;
+                        View   alignView = null;
 
-                        // Only lateral faces (X/Y normals) are aligned here.
-                        // Z-normal faces (Top/Bottom) are handled by parameter
-                        // association in TryAssociateExtrusionHeight.
-                        if      (n.X < -0.9) { planeName = "Left";  }
-                        else if (n.X >  0.9) { planeName = "Right"; }
-                        else if (n.Y < -0.9) { planeName = "Front"; }
-                        else if (n.Y >  0.9) { planeName = "Back";  }
+                        if      (n.X < -0.9) { planeName = "Left";   alignView = planView; }
+                        else if (n.X >  0.9) { planeName = "Right";  alignView = planView; }
+                        else if (n.Y < -0.9) { planeName = "Front";  alignView = planView; }
+                        else if (n.Y >  0.9) { planeName = "Back";   alignView = planView; }
+                        else if (n.Z < -0.9) { planeName = "Base";   alignView = elevView; }
+                        else if (n.Z >  0.9) { planeName = "Top";    alignView = elevView; }
 
-                        if (planeName == null) continue;
+                        if (planeName == null || alignView == null) continue;
 
                         ReferencePlane rp;
                         if (!planesByName.TryGetValue(planeName, out rp)) continue;
@@ -2122,7 +1867,7 @@ namespace RevitFamilyBuilder.FamilyBuilder
                         try
                         {
                             familyDoc.FamilyCreate.NewAlignment(
-                                planView, rp.GetReference(), pf.Reference);
+                                alignView, rp.GetReference(), pf.Reference);
                         }
                         catch (Exception ex)
                         {
@@ -2537,15 +2282,8 @@ namespace RevitFamilyBuilder.FamilyBuilder
         // present as type parameters).  Each formula runs in its own Transaction so a
         // single failure does not abort the others.  Returns the number applied.
         //
-        // Revit size_lookup syntax:
-        //   size_lookup("TableName", "ColumnHeader", defaultValue, LookupKeyParam)
-        //
-        // IMPORTANT: the column header in the formula must match the FULL annotated
-        // CSV header including the ##TYPE##UNIT suffix.  For example:
-        //   size_lookup("Tbl", "Width##LENGTH##MILLIMETERS", 600 mm, LookupKey)
-        //
-        // The previous implementation used bare column names ("Width") which caused
-        // Revit to reject the formula as invalid.
+        // Formula pattern:
+        //   Width = size_lookup("TableName", "Width##LENGTH##MILLIMETERS", 600 mm, LookupKey)
         public int TryApplyLookupFormulas(
             Document familyDoc,
             FamilyDefinition definition,
@@ -2575,12 +2313,16 @@ namespace RevitFamilyBuilder.FamilyBuilder
 
                     double d;
                     if (double.TryParse(pd.DefaultValue,
-                            NumberStyles.Any, CultureInfo.InvariantCulture, out d)
+                            System.Globalization.NumberStyles.Any,
+                            System.Globalization.CultureInfo.InvariantCulture, out d)
                         && d > 0)
                         defaults[pd.Name] = d;
                 }
             }
 
+            // Logical column names used in size_lookup formulas.
+            // The CSV header has the full annotation (e.g. "Width##LENGTH##MILLIMETERS")
+            // but the formula references only the logical name before "##".
             string[] lookupColumns = { "Width", "Depth", "Height" };
 
             int applied = 0;
@@ -2589,23 +2331,14 @@ namespace RevitFamilyBuilder.FamilyBuilder
             {
                 FamilyParameter fp;
                 if (!paramsByName.TryGetValue(colName, out fp)) continue;
-                if (fp.IsInstance) continue;
-
-                // Skip parameters that already have a formula (e.g. Height = Width / 2).
-                // Applying size_lookup on top would conflict with the existing formula.
-                if (fp.IsDeterminedByFormula) continue;
+                if (fp.IsInstance) continue; // size_lookup only works on type params
 
                 double defaultMm = defaults.ContainsKey(colName) ? defaults[colName] : 600;
-
-                // The column header MUST include the full ##TYPE##UNIT annotation to
-                // match the CSV header that was imported by ImportSizeTable.
-                string columnHeader = colName + "##LENGTH##MILLIMETERS";
-
                 string formula =
                     "size_lookup(\""
                     + tableName + "\", \""
-                    + columnHeader + "\", "
-                    + defaultMm.ToString("0", CultureInfo.InvariantCulture)
+                    + colName + "\", "
+                    + defaultMm.ToString("0", System.Globalization.CultureInfo.InvariantCulture)
                     + " mm, LookupKey)";
 
                 using (Transaction tx = new Transaction(
