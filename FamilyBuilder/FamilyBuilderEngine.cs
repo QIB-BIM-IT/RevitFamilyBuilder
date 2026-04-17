@@ -876,6 +876,28 @@ namespace RevitFamilyBuilder.FamilyBuilder
         public int AddGeometry(
             Document familyDoc, FamilyDefinition definition, IList<string> warnings)
         {
+            List<string> ignoredNames;
+            return AddGeometry(familyDoc, definition, warnings, out ignoredNames);
+        }
+
+        /// <summary>
+        /// Multi-extrusion aware: iterates the <c>geometry[]</c> array, creates
+        /// one independent solid extrusion per entry, names it from
+        /// <see cref="GeometryDefinition.Name"/>, and returns the list of names
+        /// actually created via <paramref name="createdNames"/>.
+        ///
+        /// After the loop, a lightweight <c>Regenerate()</c> pass captures any
+        /// Revit failure message about coincident / overlapping / duplicate
+        /// geometry and routes it to <paramref name="warnings"/> (non-blocking).
+        /// </summary>
+        public int AddGeometry(
+            Document familyDoc,
+            FamilyDefinition definition,
+            IList<string> warnings,
+            out List<string> createdNames)
+        {
+            createdNames = new List<string>();
+
             if (definition.Geometry == null || definition.Geometry.Count == 0)
                 return 0;
 
@@ -885,6 +907,9 @@ namespace RevitFamilyBuilder.FamilyBuilder
             View planView     = FindWorkingView(familyDoc);
             View elevView     = FindElevationView(familyDoc);
             var  planesByName = BuildReferencePlaneLookup(familyDoc);
+
+            var usedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            int autoIndex = 0;
 
             foreach (GeometryDefinition geoDef in definition.Geometry)
             {
@@ -915,14 +940,95 @@ namespace RevitFamilyBuilder.FamilyBuilder
                     continue;
                 }
 
-                // All rectangular extrusion creation flows through this single method.
-                bool built = BuildRectangularExtrusion(
-                    familyDoc, w, d, h, planView, elevView, planesByName, warnings);
+                // Resolve a unique extrusion name. Validation guarantees names
+                // are present+unique from the JSON, but guard here so a missing
+                // name in legacy payloads still builds something sensible.
+                string requested = string.IsNullOrWhiteSpace(geoDef.Name)
+                    ? ("Body_" + (++autoIndex))
+                    : geoDef.Name.Trim();
 
-                if (built) count++;
+                string finalName = requested;
+                int dedupe = 1;
+                while (!usedNames.Add(finalName))
+                {
+                    dedupe++;
+                    finalName = requested + "_" + dedupe;
+                }
+
+                // All rectangular extrusion creation flows through this single method.
+                string assignedName;
+                bool built = BuildRectangularExtrusion(
+                    familyDoc, finalName, w, d, h,
+                    planView, elevView, planesByName, warnings, out assignedName);
+
+                if (built)
+                {
+                    count++;
+                    createdNames.Add(assignedName ?? finalName);
+                }
+            }
+
+            // Run a final regenerate to surface Revit warnings about coincident /
+            // overlapping / duplicate geometry. Non-blocking: we capture them
+            // into the build-report warnings list and continue.
+            if (count > 0)
+            {
+                try
+                {
+                    using (Transaction tx = new Transaction(
+                        familyDoc, "Check geometry overlaps"))
+                    {
+                        FailureHandlingOptions fho = tx.GetFailureHandlingOptions();
+                        fho.SetFailuresPreprocessor(
+                            new CoincidentGeometryWarningCollector(warnings));
+                        fho.SetClearAfterRollback(true);
+                        tx.SetFailureHandlingOptions(fho);
+
+                        tx.Start();
+                        familyDoc.Regenerate();
+                        tx.Commit();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    warnings.Add("Coincident-geometry check skipped: " + ex.Message);
+                }
             }
 
             return count;
+        }
+
+        // Captures Revit failure messages that indicate coincident / overlapping
+        // / duplicate solids, routes them to the build-report warnings, and
+        // tells Revit to swallow them so the build is never blocked by a modal.
+        private sealed class CoincidentGeometryWarningCollector : IFailuresPreprocessor
+        {
+            private readonly IList<string> _warnings;
+
+            public CoincidentGeometryWarningCollector(IList<string> warnings)
+            {
+                _warnings = warnings;
+            }
+
+            public FailureProcessingResult PreprocessFailures(
+                FailuresAccessor accessor)
+            {
+                foreach (FailureMessageAccessor msg in accessor.GetFailureMessages())
+                {
+                    string desc = msg.GetDescriptionText();
+                    if (string.IsNullOrWhiteSpace(desc)) continue;
+
+                    string lower = desc.ToLowerInvariant();
+                    if (lower.Contains("coincid") || lower.Contains("overlap")
+                        || lower.Contains("identical") || lower.Contains("duplicate")
+                        || lower.Contains("joined"))
+                    {
+                        _warnings.Add("Geometry overlap warning: " + desc);
+                        accessor.DeleteWarning(msg);
+                    }
+                }
+                return FailureProcessingResult.Continue;
+            }
         }
 
         // ── Unified rectangular extrusion builder ────────────────────────────────
@@ -943,11 +1049,14 @@ namespace RevitFamilyBuilder.FamilyBuilder
         // MUST have been created with Orientation = "elevation" (Z-normal planes).
         private static bool BuildRectangularExtrusion(
             Document familyDoc,
+            string requestedName,
             double w, double d, double h,
             View planView, View elevView,
             Dictionary<string, ReferencePlane> planesByName,
-            IList<string> warnings)
+            IList<string> warnings,
+            out string assignedName)
         {
+            assignedName = null;
             Extrusion ext = null;
 
             // ── Step 1: create the solid extrusion ────────────────────────────────
@@ -978,6 +1087,30 @@ namespace RevitFamilyBuilder.FamilyBuilder
                         Plane.CreateByNormalAndOrigin(XYZ.BasisZ, XYZ.Zero));
 
                     ext = familyDoc.FamilyCreate.NewExtrusion(true, profile, sketchPlane, h);
+
+                    // Best-effort rename so each extrusion can be identified in
+                    // the family. A duplicate name in the family doc would throw;
+                    // swallow and keep the default-assigned name in that case.
+                    if (!string.IsNullOrWhiteSpace(requestedName))
+                    {
+                        try
+                        {
+                            ext.Name = requestedName;
+                            assignedName = requestedName;
+                        }
+                        catch (Exception nameEx)
+                        {
+                            warnings.Add("Extrusion name \"" + requestedName
+                                + "\" could not be applied: " + nameEx.Message
+                                + "; kept Revit default name.");
+                            assignedName = ext.Name;
+                        }
+                    }
+                    else
+                    {
+                        assignedName = ext.Name;
+                    }
+
                     tx.Commit();
                 }
                 catch (Exception ex)
@@ -1459,7 +1592,9 @@ namespace RevitFamilyBuilder.FamilyBuilder
 
             foreach (GeometryDefinition geo in definition.Geometry)
             {
-                sb.AppendLine("Create geometry: " + geo.Type + " (" + geo.Profile + ")"
+                sb.AppendLine("Create geometry: "
+                    + (string.IsNullOrWhiteSpace(geo.Name) ? "<unnamed>" : geo.Name)
+                    + " — " + geo.Type + " (" + geo.Profile + ")"
                     + " driven by " + geo.WidthParameter
                     + " x " + geo.DepthParameter
                     + " x " + geo.HeightParameter);

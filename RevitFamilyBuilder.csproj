@@ -75,6 +75,7 @@
     <Compile Include="Schema\GeometryDefinition.cs" />
     <Compile Include="Schema\ParameterDefinition.cs" />
     <Compile Include="Schema\ReferencePlaneDefinition.cs" />
+    <Compile Include="Schema\SingleOrArrayListConverter.cs" />
     <Compile Include="Schema\SymbolicLineDefinition.cs" />
     <Compile Include="Schema\ValidationResult.cs" />
     <Compile Include="Schema\VoidDefinition.cs" />

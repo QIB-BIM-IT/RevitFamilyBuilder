@@ -4,6 +4,13 @@ namespace RevitFamilyBuilder.Schema
 {
     public class GeometryDefinition
     {
+        /// <summary>
+        /// Unique name for this extrusion inside the family document.
+        /// Required for multi-geometry builds (array of geometry) so each
+        /// extrusion can be identified individually in Revit and in logs.
+        /// </summary>
+        public string Name { get; set; }
+
         public GeometryType Type { get; set; }
         public string Profile { get; set; }
         public string WidthParameter { get; set; }

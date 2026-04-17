@@ -113,8 +113,11 @@ namespace RevitFamilyBuilder.Services
                 },
 
                 // ── Geometry ────────────────────────────────────────────────────
-                // A single rectangular extrusion built by BuildRectangularExtrusion.
-                // All six faces are automatically locked to the six named reference planes.
+                // Two rectangular extrusions sharing the same eight reference
+                // planes — geometrically superposed on purpose. This is the
+                // smallest possible test of the multi-geometry foundation:
+                // only the names differ. All six faces of each extrusion are
+                // locked to Left / Right / Front / Back / Base / Top.
                 //
                 // "symmetry" declares the axes on which the AI intends symmetry.
                 // The actual EQ constraints come from the "dimensions" entries above;
@@ -124,6 +127,17 @@ namespace RevitFamilyBuilder.Services
                 {
                     new GeometryDefinition
                     {
+                        Name            = "Body_Primary",
+                        Type            = GeometryType.Extrusion,
+                        Profile         = "rectangular",
+                        WidthParameter  = "Width",
+                        DepthParameter  = "Depth",
+                        HeightParameter = "Height",
+                        Symmetry        = new List<string> { "LR", "FB" }
+                    },
+                    new GeometryDefinition
+                    {
+                        Name            = "Body_Secondary",
                         Type            = GeometryType.Extrusion,
                         Profile         = "rectangular",
                         WidthParameter  = "Width",

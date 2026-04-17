@@ -55,7 +55,9 @@ namespace RevitFamilyBuilder.Services
             if (hasLookup)
                 _engine.SetLookupKeysForTypes(familyDoc, definition, warnings);
 
-            int geoCount       = _engine.AddGeometry(familyDoc, definition, warnings);
+            List<string> extrusionNames;
+            int geoCount       = _engine.AddGeometry(
+                familyDoc, definition, warnings, out extrusionNames);
 
             // Flex validation — runs immediately after geometry is built, before saving.
             // Each test is rolled back so the family document is unchanged afterward.
@@ -104,6 +106,8 @@ namespace RevitFamilyBuilder.Services
             msg.Append("\nDimensions:       " + dimCount);
             msg.Append("\nSymbolic lines:   " + lineCount);
             msg.Append("\nGeometry:         " + geoCount);
+            if (extrusionNames != null && extrusionNames.Count > 0)
+                msg.Append("\nExtrusions:       " + string.Join(", ", extrusionNames));
             msg.Append("\nVoids:            " + voidCount);
             msg.Append("\nConnectors:       " + connectorCount);
             msg.Append("\nLookup table:     " + lookupStatus);
