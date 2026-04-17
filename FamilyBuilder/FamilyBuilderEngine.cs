@@ -873,18 +873,40 @@ namespace RevitFamilyBuilder.FamilyBuilder
             return count;
         }
 
+        // Mapping from GeometryDefinition.Id → ElementId of the extrusion
+        // created by the most recent AddGeometry call. Exposed so future
+        // coordinator steps (e.g. connector / void targeting by geometry id)
+        // can resolve which solid they are working on. Not consumed yet.
+        private readonly Dictionary<string, ElementId> _geometryIdMap =
+            new Dictionary<string, ElementId>(StringComparer.OrdinalIgnoreCase);
+
+        public IReadOnlyDictionary<string, ElementId> GeometryIdMap
+        {
+            get { return _geometryIdMap; }
+        }
+
         public int AddGeometry(
             Document familyDoc, FamilyDefinition definition, IList<string> warnings)
         {
-            List<string> ignoredNames;
-            return AddGeometry(familyDoc, definition, warnings, out ignoredNames);
+            List<string> ignoredDescriptors;
+            int ignoredCreated, ignoredReused;
+            return AddGeometry(
+                familyDoc, definition, warnings,
+                out ignoredDescriptors,
+                out ignoredCreated,
+                out ignoredReused);
         }
 
         /// <summary>
         /// Multi-extrusion aware: iterates the <c>geometry[]</c> array, creates
-        /// one independent solid extrusion per entry, names it from
-        /// <see cref="GeometryDefinition.Name"/>, and returns the list of names
-        /// actually created via <paramref name="createdNames"/>.
+        /// one independent solid extrusion per entry, optionally assigns a
+        /// family subcategory (creating or reusing it as needed), and stores
+        /// the resulting <c>id → ElementId</c> map on the engine.
+        ///
+        /// <para>Extrusions are deliberately NOT renamed inside Revit — that
+        /// approach was removed along with the "Name could not be applied"
+        /// warning. Visual distinction between geometries is done through
+        /// subcategories (Object Styles), which is the Revit-native way.</para>
         ///
         /// After the loop, a lightweight <c>Regenerate()</c> pass captures any
         /// Revit failure message about coincident / overlapping / duplicate
@@ -894,9 +916,17 @@ namespace RevitFamilyBuilder.FamilyBuilder
             Document familyDoc,
             FamilyDefinition definition,
             IList<string> warnings,
-            out List<string> createdNames)
+            out List<string> geometryDescriptors,
+            out int subcategoriesCreated,
+            out int subcategoriesReused)
         {
-            createdNames = new List<string>();
+            geometryDescriptors = new List<string>();
+            subcategoriesCreated = 0;
+            subcategoriesReused = 0;
+
+            // Reset the map so a fresh build never leaks entries from a
+            // previous run against another document.
+            _geometryIdMap.Clear();
 
             if (definition.Geometry == null || definition.Geometry.Count == 0)
                 return 0;
@@ -908,8 +938,11 @@ namespace RevitFamilyBuilder.FamilyBuilder
             View elevView     = FindElevationView(familyDoc);
             var  planesByName = BuildReferencePlaneLookup(familyDoc);
 
-            var usedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            int autoIndex = 0;
+            // Track subcategories we have already resolved in this build so
+            // two geometries requesting the same name share one category and
+            // only the first triggers a "created" count.
+            var resolvedSubcats = new Dictionary<string, Category>(
+                StringComparer.OrdinalIgnoreCase);
 
             foreach (GeometryDefinition geoDef in definition.Geometry)
             {
@@ -940,32 +973,54 @@ namespace RevitFamilyBuilder.FamilyBuilder
                     continue;
                 }
 
-                // Resolve a unique extrusion name. Validation guarantees names
-                // are present+unique from the JSON, but guard here so a missing
-                // name in legacy payloads still builds something sensible.
-                string requested = string.IsNullOrWhiteSpace(geoDef.Name)
-                    ? ("Body_" + (++autoIndex))
-                    : geoDef.Name.Trim();
+                Extrusion ext = BuildRectangularExtrusion(
+                    familyDoc, w, d, h, planView, elevView, planesByName, warnings);
 
-                string finalName = requested;
-                int dedupe = 1;
-                while (!usedNames.Add(finalName))
+                if (ext == null) continue;
+
+                count++;
+
+                // Record the id → ElementId mapping even if subcategory
+                // assignment fails below — the extrusion exists and future
+                // steps must be able to target it.
+                string id = (geoDef.Id ?? string.Empty).Trim();
+                if (id.Length > 0 && !_geometryIdMap.ContainsKey(id))
+                    _geometryIdMap[id] = ext.Id;
+
+                string subcatApplied = null;
+                string subcatRequested = (geoDef.Subcategory ?? string.Empty).Trim();
+                if (subcatRequested.Length > 0)
                 {
-                    dedupe++;
-                    finalName = requested + "_" + dedupe;
+                    Category subCat;
+                    if (!resolvedSubcats.TryGetValue(subcatRequested, out subCat))
+                    {
+                        bool created;
+                        subCat = EnsureSubcategory(
+                            familyDoc, subcatRequested, warnings, out created);
+                        if (subCat != null)
+                        {
+                            resolvedSubcats[subcatRequested] = subCat;
+                            if (created) subcategoriesCreated++;
+                            else         subcategoriesReused++;
+                        }
+                    }
+                    else
+                    {
+                        // Same subcategory requested by a previous geometry
+                        // in this same build — already resolved, counts as reuse.
+                        subcategoriesReused++;
+                    }
+
+                    if (subCat != null
+                        && TryAssignSubcategory(familyDoc, ext, subCat, warnings))
+                    {
+                        subcatApplied = subCat.Name;
+                    }
                 }
 
-                // All rectangular extrusion creation flows through this single method.
-                string assignedName;
-                bool built = BuildRectangularExtrusion(
-                    familyDoc, finalName, w, d, h,
-                    planView, elevView, planesByName, warnings, out assignedName);
-
-                if (built)
-                {
-                    count++;
-                    createdNames.Add(assignedName ?? finalName);
-                }
+                geometryDescriptors.Add(
+                    (id.Length > 0 ? id : "<no-id>")
+                    + (subcatApplied != null ? " (" + subcatApplied + ")" : ""));
             }
 
             // Run a final regenerate to surface Revit warnings about coincident /
@@ -996,6 +1051,78 @@ namespace RevitFamilyBuilder.FamilyBuilder
             }
 
             return count;
+        }
+
+        // Resolves or creates a family subcategory under the family's own
+        // category. Returns the matching <see cref="Category"/> on success,
+        // <c>null</c> if the family owner or its category cannot be accessed.
+        private static Category EnsureSubcategory(
+            Document familyDoc,
+            string subcategoryName,
+            IList<string> warnings,
+            out bool created)
+        {
+            created = false;
+
+            Family ownerFamily = familyDoc.OwnerFamily;
+            Category parent = ownerFamily != null ? ownerFamily.FamilyCategory : null;
+            if (parent == null)
+            {
+                warnings.Add("Subcategory \"" + subcategoryName
+                    + "\" skipped: family category is not available.");
+                return null;
+            }
+
+            // Reuse if a subcategory with the same name (case-insensitive)
+            // already lives under this family's category.
+            foreach (Category existing in parent.SubCategories)
+            {
+                if (string.Equals(existing.Name, subcategoryName,
+                        StringComparison.OrdinalIgnoreCase))
+                    return existing;
+            }
+
+            try
+            {
+                using (Transaction tx = new Transaction(
+                    familyDoc, "Create Subcategory: " + subcategoryName))
+                {
+                    tx.Start();
+                    Category fresh = familyDoc.Settings.Categories.NewSubcategory(
+                        parent, subcategoryName);
+                    tx.Commit();
+                    created = true;
+                    return fresh;
+                }
+            }
+            catch (Exception ex)
+            {
+                warnings.Add("Subcategory \"" + subcategoryName
+                    + "\" could not be created: " + ex.Message);
+                return null;
+            }
+        }
+
+        private static bool TryAssignSubcategory(
+            Document familyDoc, Extrusion ext, Category subCat, IList<string> warnings)
+        {
+            try
+            {
+                using (Transaction tx = new Transaction(
+                    familyDoc, "Assign Subcategory"))
+                {
+                    tx.Start();
+                    ext.Subcategory = subCat;
+                    tx.Commit();
+                }
+                return true;
+            }
+            catch (Exception ex)
+            {
+                warnings.Add("Subcategory \"" + subCat.Name
+                    + "\" could not be assigned to extrusion: " + ex.Message);
+                return false;
+            }
         }
 
         // Captures Revit failure messages that indicate coincident / overlapping
@@ -1047,19 +1174,21 @@ namespace RevitFamilyBuilder.FamilyBuilder
         //
         // For the Top/Bottom locks to succeed the "Base" and "Top" reference planes
         // MUST have been created with Orientation = "elevation" (Z-normal planes).
-        private static bool BuildRectangularExtrusion(
+        private static Extrusion BuildRectangularExtrusion(
             Document familyDoc,
-            string requestedName,
             double w, double d, double h,
             View planView, View elevView,
             Dictionary<string, ReferencePlane> planesByName,
-            IList<string> warnings,
-            out string assignedName)
+            IList<string> warnings)
         {
-            assignedName = null;
             Extrusion ext = null;
 
             // ── Step 1: create the solid extrusion ────────────────────────────────
+            // Extrusion naming is intentionally NOT attempted: Revit extrusions
+            // do not expose a user-facing name and any attempt to set one
+            // triggers a "Name could not be applied" warning. Visual distinction
+            // between geometries is done via subcategories, assigned by the
+            // caller after this method returns.
             using (Transaction tx = new Transaction(familyDoc, "Add Rectangular Extrusion"))
             {
                 tx.Start();
@@ -1087,37 +1216,13 @@ namespace RevitFamilyBuilder.FamilyBuilder
                         Plane.CreateByNormalAndOrigin(XYZ.BasisZ, XYZ.Zero));
 
                     ext = familyDoc.FamilyCreate.NewExtrusion(true, profile, sketchPlane, h);
-
-                    // Best-effort rename so each extrusion can be identified in
-                    // the family. A duplicate name in the family doc would throw;
-                    // swallow and keep the default-assigned name in that case.
-                    if (!string.IsNullOrWhiteSpace(requestedName))
-                    {
-                        try
-                        {
-                            ext.Name = requestedName;
-                            assignedName = requestedName;
-                        }
-                        catch (Exception nameEx)
-                        {
-                            warnings.Add("Extrusion name \"" + requestedName
-                                + "\" could not be applied: " + nameEx.Message
-                                + "; kept Revit default name.");
-                            assignedName = ext.Name;
-                        }
-                    }
-                    else
-                    {
-                        assignedName = ext.Name;
-                    }
-
                     tx.Commit();
                 }
                 catch (Exception ex)
                 {
                     tx.RollBack();
                     warnings.Add("Rectangular extrusion creation failed: " + ex.Message);
-                    return false;
+                    return null;
                 }
             }
 
@@ -1140,7 +1245,7 @@ namespace RevitFamilyBuilder.FamilyBuilder
                 warnings.Add("Extrusion face-locking transaction failed: " + ex.Message);
             }
 
-            return true;
+            return ext;
         }
 
         // Reads a family parameter's current value (in internal feet).
@@ -1592,8 +1697,11 @@ namespace RevitFamilyBuilder.FamilyBuilder
 
             foreach (GeometryDefinition geo in definition.Geometry)
             {
-                sb.AppendLine("Create geometry: "
-                    + (string.IsNullOrWhiteSpace(geo.Name) ? "<unnamed>" : geo.Name)
+                string idLabel = string.IsNullOrWhiteSpace(geo.Id)
+                    ? "<no-id>" : geo.Id;
+                string subLabel = string.IsNullOrWhiteSpace(geo.Subcategory)
+                    ? string.Empty : " [" + geo.Subcategory + "]";
+                sb.AppendLine("Create geometry: " + idLabel + subLabel
                     + " — " + geo.Type + " (" + geo.Profile + ")"
                     + " driven by " + geo.WidthParameter
                     + " x " + geo.DepthParameter

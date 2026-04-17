@@ -114,10 +114,11 @@ namespace RevitFamilyBuilder.Services
 
                 // ── Geometry ────────────────────────────────────────────────────
                 // Two rectangular extrusions sharing the same eight reference
-                // planes — geometrically superposed on purpose. This is the
-                // smallest possible test of the multi-geometry foundation:
-                // only the names differ. All six faces of each extrusion are
-                // locked to Left / Right / Front / Back / Base / Top.
+                // planes — geometrically superposed on purpose. This exercises
+                // the id/subcategory contract: each geometry has a stable
+                // internal id for future engine consumers, and both request
+                // the same "Body" subcategory so the second reuses what the
+                // first created.
                 //
                 // "symmetry" declares the axes on which the AI intends symmetry.
                 // The actual EQ constraints come from the "dimensions" entries above;
@@ -127,7 +128,8 @@ namespace RevitFamilyBuilder.Services
                 {
                     new GeometryDefinition
                     {
-                        Name            = "Body_Primary",
+                        Id              = "body_primary",
+                        Subcategory     = "Body",
                         Type            = GeometryType.Extrusion,
                         Profile         = "rectangular",
                         WidthParameter  = "Width",
@@ -137,7 +139,8 @@ namespace RevitFamilyBuilder.Services
                     },
                     new GeometryDefinition
                     {
-                        Name            = "Body_Secondary",
+                        Id              = "body_secondary",
+                        Subcategory     = "Body",
                         Type            = GeometryType.Extrusion,
                         Profile         = "rectangular",
                         WidthParameter  = "Width",

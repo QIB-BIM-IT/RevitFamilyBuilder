@@ -120,7 +120,7 @@ namespace RevitFamilyBuilder.Services
                 string[] requiredPlanes =
                     { "Left", "Right", "Front", "Back", "Base", "Top" };
 
-                var geometryNames = new HashSet<string>(
+                var geometryIds = new HashSet<string>(
                     StringComparer.OrdinalIgnoreCase);
 
                 // Avoid duplicate plane-missing errors across geometry entries —
@@ -133,14 +133,17 @@ namespace RevitFamilyBuilder.Services
                     GeometryDefinition geo = definition.Geometry[i];
                     string label = "geometry[" + i + "]";
 
-                    if (string.IsNullOrWhiteSpace(geo.Name))
+                    // "id" is mandatory and must be unique across the array.
+                    // "subcategory" is intentionally NOT validated here — it is
+                    // optional and resolved at build time by the engine.
+                    if (string.IsNullOrWhiteSpace(geo.Id))
                     {
-                        errors.Add(label + ": name must not be empty.");
+                        errors.Add(label + ": id must not be empty.");
                     }
-                    else if (!geometryNames.Add(geo.Name))
+                    else if (!geometryIds.Add(geo.Id))
                     {
-                        errors.Add(label + ": duplicate geometry name \""
-                            + geo.Name + "\".");
+                        errors.Add(label + ": duplicate geometry id \""
+                            + geo.Id + "\".");
                     }
 
                     if (string.IsNullOrWhiteSpace(geo.Profile))
