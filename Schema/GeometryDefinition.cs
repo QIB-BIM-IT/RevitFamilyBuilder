@@ -31,8 +31,33 @@ namespace RevitFamilyBuilder.Schema
         public string DepthParameter { get; set; }
         public string HeightParameter { get; set; }
 
+        // ── Per-geometry bounding plane overrides ────────────────────────
+        //
+        // Each slot names the reference plane that the corresponding face of
+        // this extrusion will be locked to. All six slots are OPTIONAL: when
+        // null or empty, the engine falls back to the canonical default name
+        // ("Left", "Right", "Front", "Back", "Base", "Top") so legacy JSON
+        // that built a single centred box keeps working unchanged.
+        //
+        // Typical use-case (this PR's goal): two side-by-side extrusions
+        // sharing a vertical plane in the middle.
+        //
+        //   geometry[0] body_primary   — right_plane = "Mid_LR"  (occupies left half)
+        //   geometry[1] body_secondary — left_plane  = "Mid_LR"  (occupies right half)
+        //
+        // The extrusion's initial extent is derived from the actual offsets
+        // of these reference planes in the family document, and each face is
+        // then aligned to its declared plane, so Width / Depth / Height flex
+        // propagates correctly through the shared plane.
+        public string LeftPlane  { get; set; }
+        public string RightPlane { get; set; }
+        public string FrontPlane { get; set; }
+        public string BackPlane  { get; set; }
+        public string BasePlane  { get; set; }
+        public string TopPlane   { get; set; }
+
         // Axes on which the extrusion should be symmetric around a centre plane.
-        // Valid values: "LR" (Left-Right symmetry, requires Center_LR plane + EQ dim),
+        // Valid values: "LR" (Left-Right symmetry, requires a shared centre plane + EQ dim),
         //               "FB" (Front-Back symmetry, requires Center_FB plane + EQ dim).
         // This field is informational for the AI contract; the actual EQ constraint
         // is created through DimensionDefinition.IsEqual entries in "dimensions".

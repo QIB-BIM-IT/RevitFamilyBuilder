@@ -39,16 +39,17 @@ namespace RevitFamilyBuilder.Services
                 BuildStrategy  = "explicit_types",
 
                 // ── Parameters ──────────────────────────────────────────────────
-                // All dimensional parameters are type parameters (IsInstance = false)
-                // so that size_lookup() formulas and dimension labels work correctly.
+                // Only the parameters actually consumed by the current sample are
+                // declared: Width/Depth/Height drive the two-extrusion split.
+                // Connector/void-specific parameters were dropped together with
+                // the connector+void sections for this PR — they will come back
+                // in later PRs when connectors and voids target a specific
+                // geometry by id.
                 Parameters = new List<ParameterDefinition>
                 {
-                    new ParameterDefinition { Name = "Width",         Type = ParameterType.Length, Group = "Dimensions", IsInstance = false, DefaultValue = "600" },
-                    new ParameterDefinition { Name = "Depth",         Type = ParameterType.Length, Group = "Dimensions", IsInstance = false, DefaultValue = "400" },
-                    new ParameterDefinition { Name = "Height",        Type = ParameterType.Length, Group = "Dimensions", IsInstance = false, DefaultValue = "300" },
-                    new ParameterDefinition { Name = "Diameter",      Type = ParameterType.Length, Group = "Dimensions", IsInstance = false, DefaultValue = "200" },
-                    new ParameterDefinition { Name = "OpeningWidth",  Type = ParameterType.Length, Group = "Dimensions", IsInstance = false, DefaultValue = "300" },
-                    new ParameterDefinition { Name = "OpeningHeight", Type = ParameterType.Length, Group = "Dimensions", IsInstance = false, DefaultValue = "200" }
+                    new ParameterDefinition { Name = "Width",  Type = ParameterType.Length, Group = "Dimensions", IsInstance = false, DefaultValue = "600" },
+                    new ParameterDefinition { Name = "Depth",  Type = ParameterType.Length, Group = "Dimensions", IsInstance = false, DefaultValue = "400" },
+                    new ParameterDefinition { Name = "Height", Type = ParameterType.Length, Group = "Dimensions", IsInstance = false, DefaultValue = "300" }
                 },
 
                 // ── Reference planes ────────────────────────────────────────────
@@ -59,12 +60,15 @@ namespace RevitFamilyBuilder.Services
                 // Z-normal planes visible in the front-elevation view.  These are the
                 // ONLY planes that can correctly constrain the extrusion top/bottom faces.
                 //
-                // Centre planes at offset 0 are used for EQ symmetry dimensions below.
+                // Mid_LR is the central vertical plane shared by the two extrusions
+                // body_primary and body_secondary. Placing it at offset 0 puts it
+                // exactly midway between Left (-300) and Right (+300), which is the
+                // precondition Revit requires before an EQ constraint can lock it
+                // to the midpoint. Center_FB stays as the Y-axis symmetry anchor.
                 ReferencePlanes = new List<ReferencePlaneDefinition>
                 {
-                    // Symmetry centres — must exist before EQ dimensions are created.
-                    new ReferencePlaneDefinition { Name = "Center_LR", Orientation = "vertical",   Offset =    0.0 },
                     new ReferencePlaneDefinition { Name = "Center_FB", Orientation = "horizontal", Offset =    0.0 },
+                    new ReferencePlaneDefinition { Name = "Mid_LR",    Orientation = "vertical",   Offset =    0.0 },
 
                     // Lateral bounding planes.
                     new ReferencePlaneDefinition { Name = "Left",  Orientation = "vertical",   Offset = -300.0 },
@@ -73,31 +77,30 @@ namespace RevitFamilyBuilder.Services
                     new ReferencePlaneDefinition { Name = "Back",  Orientation = "horizontal", Offset =  200.0 },
 
                     // Elevation planes (Z-normal) — REQUIRED for height flex to work.
-                    // "elevation" orientation creates planes with normal (0,0,1) at the
-                    // given Z offset.  Without this, the extrusion top/bottom faces
-                    // cannot be locked and Height will not drive the geometry.
                     new ReferencePlaneDefinition { Name = "Base", Orientation = "elevation", Offset =   0.0 },
                     new ReferencePlaneDefinition { Name = "Top",  Orientation = "elevation", Offset = 300.0 }
                 },
 
                 // ── Dimensions ──────────────────────────────────────────────────
-                // Three labelled dimensions drive Width, Depth, Height parameters.
-                // Two additional EQ dimensions lock the centre planes to the midpoints,
-                // ensuring Left-Right and Front-Back symmetry around the origin.
+                // Three labelled dimensions drive Width, Depth, Height.
+                // Two EQ dimensions enforce symmetry:
+                //   • Left ↔ Mid_LR ↔ Right  locks Mid_LR to the LR midpoint
+                //     so the two extrusions sharing Mid_LR always occupy
+                //     equal halves of Width.
+                //   • Front ↔ Center_FB ↔ Back locks the family's Y-axis
+                //     symmetry as before.
                 //
                 // EQ dimension rules:
-                //   • ReferencePlaneMiddle must name the centre plane.
+                //   • ReferencePlaneMiddle must name the middle plane.
                 //   • IsEqual = true marks every segment as IsEqualDriven.
                 //   • Leave ParameterName empty on EQ dims (no label, only constraint).
                 Dimensions = new List<DimensionDefinition>
                 {
-                    // Labelled driving dimensions.
                     new DimensionDefinition { ReferencePlane1 = "Left",  ReferencePlane2 = "Right", ParameterName = "Width"  },
                     new DimensionDefinition { ReferencePlane1 = "Front", ReferencePlane2 = "Back",  ParameterName = "Depth"  },
                     new DimensionDefinition { ReferencePlane1 = "Base",  ReferencePlane2 = "Top",   ParameterName = "Height" },
 
-                    // EQ symmetry constraints — no parameter label, only constraint.
-                    new DimensionDefinition { ReferencePlane1 = "Left",  ReferencePlaneMiddle = "Center_LR", ReferencePlane2 = "Right", IsEqual = true },
+                    new DimensionDefinition { ReferencePlane1 = "Left",  ReferencePlaneMiddle = "Mid_LR",    ReferencePlane2 = "Right", IsEqual = true },
                     new DimensionDefinition { ReferencePlane1 = "Front", ReferencePlaneMiddle = "Center_FB", ReferencePlane2 = "Back",  IsEqual = true }
                 },
 
@@ -113,17 +116,19 @@ namespace RevitFamilyBuilder.Services
                 },
 
                 // ── Geometry ────────────────────────────────────────────────────
-                // Two rectangular extrusions sharing the same eight reference
-                // planes — geometrically superposed on purpose. This exercises
-                // the id/subcategory contract: each geometry has a stable
-                // internal id for future engine consumers, and both request
-                // the same "Body" subcategory so the second reuses what the
-                // first created.
+                // First real geometric differentiation: two rectangular extrusions
+                // sitting SIDE BY SIDE, sharing Mid_LR as their inner boundary.
                 //
-                // "symmetry" declares the axes on which the AI intends symmetry.
-                // The actual EQ constraints come from the "dimensions" entries above;
-                // this field is used by the AI layer to know which centre planes to
-                // declare and which EQ dims to include.
+                //   body_primary   bounded by [Left,   Mid_LR, Front, Back, Base, Top]
+                //                  → occupies the LEFT half of Width.
+                //   body_secondary bounded by [Mid_LR, Right,  Front, Back, Base, Top]
+                //                  → occupies the RIGHT half of Width.
+                //
+                // The "Left ↔ Mid_LR ↔ Right" EQ dimension keeps Mid_LR centred
+                // while Width flexes, so each half always renders at Width / 2.
+                //
+                // Both geometries request the Body subcategory to exercise the
+                // create-once / reuse path from the previous PR.
                 Geometry = new List<GeometryDefinition>
                 {
                     new GeometryDefinition
@@ -135,7 +140,9 @@ namespace RevitFamilyBuilder.Services
                         WidthParameter  = "Width",
                         DepthParameter  = "Depth",
                         HeightParameter = "Height",
-                        Symmetry        = new List<string> { "LR", "FB" }
+                        LeftPlane       = "Left",
+                        RightPlane      = "Mid_LR",
+                        Symmetry        = new List<string> { "FB" }
                     },
                     new GeometryDefinition
                     {
@@ -146,7 +153,9 @@ namespace RevitFamilyBuilder.Services
                         WidthParameter  = "Width",
                         DepthParameter  = "Depth",
                         HeightParameter = "Height",
-                        Symmetry        = new List<string> { "LR", "FB" }
+                        LeftPlane       = "Mid_LR",
+                        RightPlane      = "Right",
+                        Symmetry        = new List<string> { "FB" }
                     }
                 },
 
@@ -188,40 +197,24 @@ namespace RevitFamilyBuilder.Services
                 },
 
                 // ── Voids ───────────────────────────────────────────────────────
-                Voids = new List<VoidDefinition>
-                {
-                    new VoidDefinition
-                    {
-                        Name            = "FrontOpening",
-                        Shape           = "Rectangular",
-                        Face            = "Front",
-                        Location        = "Center",
-                        WidthParameter  = "OpeningWidth",
-                        HeightParameter = "OpeningHeight",
-                        Cut             = "Through"
-                    }
-                },
+                // Intentionally empty in this PR. A void cuts a specific extrusion
+                // face; now that there are two extrusions, void targeting must be
+                // expressed by geometry_id. That work is scheduled for a later PR.
+                Voids = new List<VoidDefinition>(),
 
                 // ── Connectors ──────────────────────────────────────────────────
-                Connectors = new List<ConnectorDefinition>
-                {
-                    new ConnectorDefinition
-                    {
-                        Name              = "Primary",
-                        Domain            = "HVAC",
-                        Shape             = "Round",
-                        Face              = "Back",
-                        Location          = "Center",
-                        DiameterParameter = "Diameter"
-                    }
-                },
+                // Intentionally empty for the same reason as Voids above — the
+                // connector must declare which geometry it sits on. Re-introduced
+                // in a later PR with geometry_id targeting.
+                Connectors = new List<ConnectorDefinition>(),
 
                 Warnings = new List<string>
                 {
                     "Sample JSON only — not generated by AI.",
                     "Sample JSON — exercises explicit_types strategy with formula.",
                     "Height is formula-driven (Width / 2); FlexTest will skip it when testing directly.",
-                    "EQ dimensions for Center_LR and Center_FB require those planes to exist before AddDimensions runs."
+                    "Two extrusions share the Mid_LR reference plane — EQ(Left, Mid_LR, Right) keeps it centred during flex.",
+                    "Connectors and voids are intentionally empty in this sample until geometry-id targeting ships."
                 }
             };
         }

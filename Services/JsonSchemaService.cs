@@ -113,19 +113,17 @@ namespace RevitFamilyBuilder.Services
             }
             else
             {
-                // The engine's rectangular extrusion builder locks faces to the
-                // six canonical named planes. Validate that those exist in the
-                // pool before build time, so every geometry entry in the array
-                // can actually build.
-                string[] requiredPlanes =
+                // Each geometry declares (explicitly or by default) the six
+                // reference planes its faces will be locked to. A missing plane
+                // must be reported against the geometry that needs it, so two
+                // geometries bounded by different planes can both be checked
+                // in isolation.
+                string[] canonicalDefaults =
                     { "Left", "Right", "Front", "Back", "Base", "Top" };
+                string[] slotLabels =
+                    { "left", "right", "front", "back", "base", "top" };
 
                 var geometryIds = new HashSet<string>(
-                    StringComparer.OrdinalIgnoreCase);
-
-                // Avoid duplicate plane-missing errors across geometry entries —
-                // every geometry shares the same canonical pool today.
-                var reportedMissingPlanes = new HashSet<string>(
                     StringComparer.OrdinalIgnoreCase);
 
                 for (int i = 0; i < definition.Geometry.Count; i++)
@@ -161,16 +159,36 @@ namespace RevitFamilyBuilder.Services
                         errors.Add(label + ": references unknown height parameter: \""
                             + geo.HeightParameter + "\".");
 
-                    // Each geometry in the array must be able to resolve its
-                    // bounding reference planes from the pool.
-                    foreach (string required in requiredPlanes)
+                    // Resolve the six effective plane names (override or
+                    // canonical default) and make sure each one exists in the
+                    // reference-plane pool.
+                    string[] effectiveNames =
                     {
-                        if (planeNames.Contains(required)) continue;
-                        if (!reportedMissingPlanes.Add(required)) continue;
+                        string.IsNullOrWhiteSpace(geo.LeftPlane)
+                            ? canonicalDefaults[0] : geo.LeftPlane.Trim(),
+                        string.IsNullOrWhiteSpace(geo.RightPlane)
+                            ? canonicalDefaults[1] : geo.RightPlane.Trim(),
+                        string.IsNullOrWhiteSpace(geo.FrontPlane)
+                            ? canonicalDefaults[2] : geo.FrontPlane.Trim(),
+                        string.IsNullOrWhiteSpace(geo.BackPlane)
+                            ? canonicalDefaults[3] : geo.BackPlane.Trim(),
+                        string.IsNullOrWhiteSpace(geo.BasePlane)
+                            ? canonicalDefaults[4] : geo.BasePlane.Trim(),
+                        string.IsNullOrWhiteSpace(geo.TopPlane)
+                            ? canonicalDefaults[5] : geo.TopPlane.Trim()
+                    };
 
-                        errors.Add(label
-                            + ": required bounding reference plane \""
-                            + required + "\" is not declared in reference_planes.");
+                    var reportedPerGeo = new HashSet<string>(
+                        StringComparer.OrdinalIgnoreCase);
+                    for (int s = 0; s < effectiveNames.Length; s++)
+                    {
+                        string planeName = effectiveNames[s];
+                        if (planeNames.Contains(planeName)) continue;
+                        if (!reportedPerGeo.Add(planeName)) continue;
+
+                        errors.Add(label + ": " + slotLabels[s]
+                            + "_plane references unknown reference plane \""
+                            + planeName + "\".");
                     }
                 }
             }
