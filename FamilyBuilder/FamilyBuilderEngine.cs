@@ -1819,123 +1819,214 @@ namespace RevitFamilyBuilder.FamilyBuilder
         }
 
         // ── MEP Connectors ────────────────────────────────────────────────────
+        //
+        // Each connector targets a SPECIFIC extrusion by its geometry id
+        // (populated into _geometryIdMap by AddGeometry). This is the first
+        // consumer of that mapping — before this PR, AddConnectors fell back
+        // to extrusions[0], which silently picked a host regardless of what
+        // the JSON asked for. Now the JSON is authoritative.
 
+        // Thin overload kept for back-compat with callers that do not need
+        // the per-connector descriptor list.
         public int AddConnectors(
             Document familyDoc, FamilyDefinition definition, IList<string> warnings)
         {
+            List<string> ignored;
+            return AddConnectors(familyDoc, definition, warnings, out ignored);
+        }
+
+        /// <summary>
+        /// Creates the MEP connectors declared in <paramref name="definition"/>
+        /// and returns the number of successful creations. Each successful
+        /// connector produces one human-readable entry in
+        /// <paramref name="connectorDescriptors"/>, e.g.
+        /// <c>connector[0]: body_primary.back (In, Global, Round, ⌀Diameter=200mm)</c>.
+        /// </summary>
+        public int AddConnectors(
+            Document familyDoc,
+            FamilyDefinition definition,
+            IList<string> warnings,
+            out List<string> connectorDescriptors)
+        {
+            connectorDescriptors = new List<string>();
+
             if (definition.Connectors == null || definition.Connectors.Count == 0)
                 return 0;
 
-            // Collect all SOLID extrusions — voids do not expose the expected
-            // faces (e.g. a frontal void has no "Back" face) and must never be
-            // chosen as the connector host.
-            var extrusions = new FilteredElementCollector(familyDoc)
-                .OfClass(typeof(Extrusion))
-                .Cast<Extrusion>()
-                .Where(e => e.IsSolid)
-                .ToList();
-
-            if (extrusions.Count == 0)
-            {
-                warnings.Add("Connector skipped: no solid extrusion found to host the connector.");
-                return 0;
-            }
-
-            Extrusion host = extrusions[0];
-
-            // Build parameter lookup.
             FamilyManager fm = familyDoc.FamilyManager;
             var paramsByName =
                 new Dictionary<string, FamilyParameter>(StringComparer.OrdinalIgnoreCase);
             foreach (FamilyParameter fp in fm.GetParameters())
                 paramsByName[fp.Definition.Name] = fp;
 
+            // Count In / Out / Bidirectional per target geometry so we can
+            // flag a convention warning after the loop (non-blocking).
+            var flowsPerGeometry =
+                new Dictionary<string, Dictionary<FlowDirectionType, int>>(
+                    StringComparer.OrdinalIgnoreCase);
+
             int created = 0;
 
-            foreach (ConnectorDefinition connDef in definition.Connectors)
+            for (int i = 0; i < definition.Connectors.Count; i++)
             {
-                if (string.IsNullOrWhiteSpace(connDef.Name)) continue;
+                ConnectorDefinition connDef = definition.Connectors[i];
+                string label = "connector[" + i + "]";
 
-                string domain = (connDef.Domain ?? string.Empty).Trim().ToUpperInvariant();
-                string shape  = (connDef.Shape  ?? string.Empty).Trim().ToUpperInvariant();
-
-                if (domain != "HVAC")
+                // ── Resolve target geometry via the id → ElementId map ────────
+                string geoId = (connDef.TargetGeometryId ?? string.Empty).Trim();
+                if (geoId.Length == 0)
                 {
-                    warnings.Add("Connector \"" + connDef.Name
-                        + "\": domain \"" + connDef.Domain
-                        + "\" is not supported in v1; skipped.");
-                    continue;
-                }
-                if (shape != "ROUND")
-                {
-                    warnings.Add("Connector \"" + connDef.Name
-                        + "\": shape \"" + connDef.Shape
-                        + "\" is not supported in v1; skipped.");
+                    warnings.Add(label + ": target_geometry_id is empty; skipped.");
                     continue;
                 }
 
-                // Resolve the named face on the extrusion solid.
-                Reference faceRef = FindNamedFaceReference(host, connDef.Face, warnings);
+                ElementId extId;
+                if (!_geometryIdMap.TryGetValue(geoId, out extId)
+                    || extId == ElementId.InvalidElementId)
+                {
+                    warnings.Add(label + ": target_geometry_id \"" + geoId
+                        + "\" does not match any geometry built in this family "
+                        + "(check AddGeometry ran successfully); skipped.");
+                    continue;
+                }
+
+                Extrusion host = familyDoc.GetElement(extId) as Extrusion;
+                if (host == null || !host.IsSolid)
+                {
+                    warnings.Add(label + ": target geometry \"" + geoId
+                        + "\" is not a solid extrusion; skipped.");
+                    continue;
+                }
+
+                // ── Profile guard: this PR supports only Round ────────────────
+                string profile = (connDef.Profile ?? string.Empty).Trim();
+                if (!string.Equals(profile, "Round",
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    warnings.Add(label + ": profile \"" + connDef.Profile
+                        + "\" is not supported in this PR; use \"Round\".");
+                    continue;
+                }
+
+                // ── Face resolution on THIS specific extrusion ────────────────
+                string faceName = (connDef.TargetFace ?? string.Empty).Trim();
+                XYZ    faceCentre;
+                Reference faceRef = FindNamedFaceReference(
+                    host, faceName, label, out faceCentre, warnings);
                 if (faceRef == null)
-                    continue; // warning already added by the helper
+                    continue; // helper already emitted a warning
 
+                // ── Enum parsing ──────────────────────────────────────────────
+                DuctSystemType    sysType = ParseDuctSystemType(connDef.SystemClassification);
+                FlowDirectionType flow    = ParseFlowDirection(connDef.FlowDirection);
+
+                // ── Create the connector and apply flow / diameter ────────────
                 using (Transaction tx = new Transaction(
-                    familyDoc, "Add Connector: " + connDef.Name))
+                    familyDoc, "Add Connector: " + geoId + "." + faceName))
                 {
                     tx.Start();
                     try
                     {
                         ConnectorElement ce = ConnectorElement.CreateDuctConnector(
-                            familyDoc,
-                            DuctSystemType.SupplyAir,
-                            ConnectorProfileType.Round,
-                            faceRef);
+                            familyDoc, sysType, ConnectorProfileType.Round, faceRef);
+
+                        // Flow direction: ConnectorElement.Direction is
+                        // get-only, so drive it through the BuiltInParameter.
+                        TrySetFlowDirection(ce, flow, label, warnings);
 
                         // Bind the connector size to the named family parameter.
                         if (!string.IsNullOrWhiteSpace(connDef.DiameterParameter))
                         {
                             FamilyParameter diamFp;
-                            if (paramsByName.TryGetValue(connDef.DiameterParameter, out diamFp))
+                            if (paramsByName.TryGetValue(
+                                    connDef.DiameterParameter.Trim(), out diamFp))
                                 TryBindConnectorSizeParameter(
-                                    fm, ce, diamFp, connDef.Name, warnings);
+                                    fm, ce, diamFp, label, warnings);
                             else
-                                warnings.Add("Connector \"" + connDef.Name
-                                    + "\": diameter_parameter \""
+                                warnings.Add(label + ": diameter_parameter \""
                                     + connDef.DiameterParameter + "\" not found.");
                         }
 
-                        created++;
                         tx.Commit();
+                        created++;
+
+                        // Bookkeeping for the post-loop convention check.
+                        Dictionary<FlowDirectionType, int> flowCounts;
+                        if (!flowsPerGeometry.TryGetValue(geoId, out flowCounts))
+                        {
+                            flowCounts = new Dictionary<FlowDirectionType, int>();
+                            flowsPerGeometry[geoId] = flowCounts;
+                        }
+                        if (!flowCounts.ContainsKey(flow)) flowCounts[flow] = 0;
+                        flowCounts[flow]++;
+
+                        // Diagnostic line — proves the connector sits on the
+                        // targeted geometry's face, not the family centre.
+                        string diamTxt = FormatBoundDiameter(
+                            fm, connDef.DiameterParameter);
+                        connectorDescriptors.Add(
+                            label + ": " + geoId + "." + faceName.ToLowerInvariant()
+                            + " (" + flow + ", " + sysType + ", Round"
+                            + (diamTxt != null ? ", " + diamTxt : "")
+                            + ") @ " + FormatFaceCentreMm(faceCentre));
                     }
                     catch (Exception ex)
                     {
                         tx.RollBack();
-                        warnings.Add("Connector \"" + connDef.Name
-                            + "\" creation failed: " + ex.Message);
+                        warnings.Add(label + ": connector creation failed on "
+                            + geoId + "." + faceName + ": " + ex.Message);
                     }
+                }
+            }
+
+            // ── Convention check: for a through-fitting, one In + one Out is
+            // the expected pattern. Not blocking — just surfaced as a warning.
+            foreach (var kv in flowsPerGeometry)
+            {
+                int inCount, outCount, biCount;
+                kv.Value.TryGetValue(FlowDirectionType.In,            out inCount);
+                kv.Value.TryGetValue(FlowDirectionType.Out,           out outCount);
+                kv.Value.TryGetValue(FlowDirectionType.Bidirectional, out biCount);
+
+                int total = inCount + outCount + biCount;
+                if (total >= 2 && !(inCount == 1 && outCount == 1 && biCount == 0))
+                {
+                    warnings.Add("Connector convention: geometry \""
+                        + kv.Key + "\" has "
+                        + inCount + " In / " + outCount + " Out / "
+                        + biCount + " Bidirectional — through-fittings usually "
+                        + "declare exactly 1 In + 1 Out.");
                 }
             }
 
             return created;
         }
 
-        // Returns a stable Reference to the planar face of an extrusion whose outward
-        // normal aligns with the direction implied by faceName.
+        // Returns a stable Reference to the planar face of an extrusion whose
+        // outward normal aligns with the direction implied by faceName, along
+        // with the geometric centre of that face (used purely for diagnostics).
         //
-        // Coordinate conventions for the centered-at-origin rectangular extrusion
-        // created by AddGeometry (profile in XY, extruded along +Z):
+        // Face-normal mapping is independent of extrusion position: a box
+        // bounded by [Left, Mid_LR, Front, Back, Base, Top] still has a face
+        // whose normal is +Y (back) even though the box is off-centre in X.
         //   Top    →  (0,  0, +1)    Bottom → (0,  0, -1)
         //   Front  →  (0, -1,  0)    Back   → (0, +1,  0)
         //   Left   → (-1,  0,  0)    Right  → (+1,  0,  0)
         private static Reference FindNamedFaceReference(
-            Extrusion extrusion, string faceName, IList<string> warnings)
+            Extrusion extrusion,
+            string faceName,
+            string diagnosticLabel,
+            out XYZ faceCentre,
+            IList<string> warnings)
         {
+            faceCentre = XYZ.Zero;
+
             XYZ expected = FaceNameToNormal(faceName);
             if (expected == null)
             {
-                warnings.Add("Connector: face name \""
-                    + faceName
-                    + "\" is not recognised; valid values are Front, Back, Left, Right, Top, Bottom.");
+                warnings.Add(diagnosticLabel + ": target_face \""
+                    + faceName + "\" is not recognised; valid values are "
+                    + "front, back, left, right, top, bottom.");
                 return null;
             }
 
@@ -1948,7 +2039,9 @@ namespace RevitFamilyBuilder.FamilyBuilder
             GeometryElement geomElem = extrusion.get_Geometry(opts);
             if (geomElem == null)
             {
-                warnings.Add("Connector: could not retrieve geometry from extrusion.");
+                warnings.Add(diagnosticLabel
+                    + ": could not find matching face — no geometry "
+                    + "returned from target extrusion.");
                 return null;
             }
 
@@ -1963,13 +2056,123 @@ namespace RevitFamilyBuilder.FamilyBuilder
                     if (pf == null) continue;
 
                     if (pf.FaceNormal.DotProduct(expected) > 0.9)
+                    {
+                        faceCentre = ComputePlanarFaceCentre(pf);
                         return pf.Reference;
+                    }
                 }
             }
 
-            warnings.Add("Connector: no face matching \""
-                + faceName + "\" found on extrusion solid.");
+            warnings.Add(diagnosticLabel + ": could not find matching face \""
+                + faceName + "\" on target extrusion (normal "
+                + expected.X.ToString("0.##") + ", "
+                + expected.Y.ToString("0.##") + ", "
+                + expected.Z.ToString("0.##") + ").");
             return null;
+        }
+
+        // Returns the geometric centre of a PlanarFace by averaging the
+        // extremes of its UV bounding box and evaluating the face there.
+        private static XYZ ComputePlanarFaceCentre(PlanarFace pf)
+        {
+            BoundingBoxUV bb = pf.GetBoundingBox();
+            UV mid = new UV(
+                (bb.Min.U + bb.Max.U) / 2.0,
+                (bb.Min.V + bb.Max.V) / 2.0);
+            return pf.Evaluate(mid);
+        }
+
+        // Formats a face-centre XYZ in millimetres for the diagnostic log.
+        private static string FormatFaceCentreMm(XYZ ptFt)
+        {
+            double xMm = UnitUtils.ConvertFromInternalUnits(ptFt.X, UnitTypeId.Millimeters);
+            double yMm = UnitUtils.ConvertFromInternalUnits(ptFt.Y, UnitTypeId.Millimeters);
+            double zMm = UnitUtils.ConvertFromInternalUnits(ptFt.Z, UnitTypeId.Millimeters);
+            return "("
+                + xMm.ToString("0", System.Globalization.CultureInfo.InvariantCulture) + ", "
+                + yMm.ToString("0", System.Globalization.CultureInfo.InvariantCulture) + ", "
+                + zMm.ToString("0", System.Globalization.CultureInfo.InvariantCulture) + ") mm";
+        }
+
+        // Returns "⌀<paramName>=<value>mm" for the log, or null if the
+        // parameter cannot be read at this time.
+        private static string FormatBoundDiameter(
+            FamilyManager fm, string paramName)
+        {
+            if (string.IsNullOrWhiteSpace(paramName) || fm.CurrentType == null)
+                return null;
+
+            FamilyParameter fp = null;
+            foreach (FamilyParameter candidate in fm.GetParameters())
+            {
+                if (string.Equals(candidate.Definition.Name, paramName.Trim(),
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    fp = candidate;
+                    break;
+                }
+            }
+            if (fp == null) return null;
+
+            double? val = fm.CurrentType.AsDouble(fp);
+            if (!val.HasValue) return null;
+
+            double mm = UnitUtils.ConvertFromInternalUnits(val.Value, UnitTypeId.Millimeters);
+            return "⌀" + paramName + "="
+                + mm.ToString("0", System.Globalization.CultureInfo.InvariantCulture)
+                + "mm";
+        }
+
+        private static DuctSystemType ParseDuctSystemType(string raw)
+        {
+            switch ((raw ?? string.Empty).Trim().ToUpperInvariant())
+            {
+                case "SUPPLYAIR":  return DuctSystemType.SupplyAir;
+                case "RETURNAIR":  return DuctSystemType.ReturnAir;
+                case "EXHAUSTAIR": return DuctSystemType.ExhaustAir;
+                case "FITTING":    return DuctSystemType.Fitting;
+                case "GLOBAL":
+                default:           return DuctSystemType.Global;
+            }
+        }
+
+        private static FlowDirectionType ParseFlowDirection(string raw)
+        {
+            switch ((raw ?? string.Empty).Trim().ToUpperInvariant())
+            {
+                case "IN":            return FlowDirectionType.In;
+                case "OUT":           return FlowDirectionType.Out;
+                case "BIDIRECTIONAL":
+                default:              return FlowDirectionType.Bidirectional;
+            }
+        }
+
+        // Sets the connector's flow direction through the BuiltInParameter
+        // because ConnectorElement.Direction is get-only in the public API.
+        private static void TrySetFlowDirection(
+            ConnectorElement ce,
+            FlowDirectionType flow,
+            string diagnosticLabel,
+            IList<string> warnings)
+        {
+            try
+            {
+                Parameter p = ce.get_Parameter(
+                    BuiltInParameter.RBS_DUCT_FLOW_DIRECTION_PARAM);
+                if (p == null || p.IsReadOnly)
+                {
+                    warnings.Add(diagnosticLabel
+                        + ": flow_direction parameter not writable on connector "
+                        + "(Direction stays at the Revit default).");
+                    return;
+                }
+                p.Set((int)flow);
+            }
+            catch (Exception ex)
+            {
+                warnings.Add(diagnosticLabel
+                    + ": could not apply flow_direction: " + ex.Message);
+            }
         }
 
         // Maps a face name to its expected outward-normal direction.
@@ -2005,7 +2208,7 @@ namespace RevitFamilyBuilder.FamilyBuilder
             FamilyManager fm,
             ConnectorElement ce,
             FamilyParameter familyParam,
-            string connectorName,
+            string diagnosticLabel,
             IList<string> warnings)
         {
             // Strategy 1: CONNECTOR_RADIUS by built-in parameter ID.
@@ -2056,8 +2259,8 @@ namespace RevitFamilyBuilder.FamilyBuilder
                 ? "tried: " + string.Join(", ", tried.ToArray())
                 : "CONNECTOR_RADIUS was null or read-only; no other candidates found";
 
-            warnings.Add("Connector \"" + connectorName
-                + "\": could not bind diameter parameter ["
+            warnings.Add(diagnosticLabel
+                + ": could not bind diameter parameter ["
                 + triedStr + "]: " + detail);
         }
 

@@ -69,7 +69,9 @@ namespace RevitFamilyBuilder.Services
 
             // Connectors must be placed before voids — a "Through" void
             // destroys the planar face that the connector needs as host.
-            int connectorCount = _engine.AddConnectors(familyDoc, definition, warnings);
+            List<string> connectorDescriptors;
+            int connectorCount = _engine.AddConnectors(
+                familyDoc, definition, warnings, out connectorDescriptors);
             int voidCount      = _engine.AddVoids(familyDoc, definition, warnings);
 
             // ── Lookup table setup (before save so the family doc is still open) ──
@@ -119,6 +121,11 @@ namespace RevitFamilyBuilder.Services
                     + subcatReused + " reused");
             msg.Append("\nVoids:            " + voidCount);
             msg.Append("\nConnectors:       " + connectorCount);
+            if (connectorDescriptors != null && connectorDescriptors.Count > 0)
+            {
+                foreach (string d in connectorDescriptors)
+                    msg.Append("\n  " + d);
+            }
             msg.Append("\nLookup table:     " + lookupStatus);
             msg.Append("\nSaved to:         " + savedPath);
             if (csvPath != null)

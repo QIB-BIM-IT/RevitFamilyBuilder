@@ -261,10 +261,31 @@ namespace RevitFamilyBuilder.Services
             }
 
             // --- Connector rules (optional — null or empty list is valid) ---
+            //
+            // Each connector is hosted on a SPECIFIC extrusion named by
+            // target_geometry_id. The engine uses the id → ElementId map
+            // populated by AddGeometry to resolve the host, so connectors
+            // placed on different geometries never fight over the same face.
 
             var validFaces = new HashSet<string>(
                 new[] { "FRONT", "BACK", "LEFT", "RIGHT", "TOP", "BOTTOM" },
                 StringComparer.OrdinalIgnoreCase);
+            var validFlows = new HashSet<string>(
+                new[] { "IN", "OUT", "BIDIRECTIONAL" },
+                StringComparer.OrdinalIgnoreCase);
+            var validSystems = new HashSet<string>(
+                new[] { "GLOBAL", "SUPPLYAIR", "RETURNAIR", "EXHAUSTAIR", "FITTING" },
+                StringComparer.OrdinalIgnoreCase);
+
+            // Build a geometry-id lookup so target_geometry_id can be
+            // validated against the declared geometry array.
+            var declaredGeometryIds = new HashSet<string>(
+                StringComparer.OrdinalIgnoreCase);
+            for (int i = 0; i < definition.Geometry.Count; i++)
+            {
+                string gid = definition.Geometry[i].Id;
+                if (!string.IsNullOrWhiteSpace(gid)) declaredGeometryIds.Add(gid);
+            }
 
             if (definition.Connectors != null && definition.Connectors.Count > 0)
             {
@@ -274,58 +295,84 @@ namespace RevitFamilyBuilder.Services
                     string label = "connectors[" + i + "]";
 
                     if (string.IsNullOrWhiteSpace(c.Name))
-                    {
                         errors.Add(label + ": name must not be empty.");
-                        continue;
+
+                    // target_geometry_id is mandatory and must match a declared geometry.
+                    if (string.IsNullOrWhiteSpace(c.TargetGeometryId))
+                    {
+                        errors.Add(label + ": target_geometry_id is required.");
+                    }
+                    else if (!declaredGeometryIds.Contains(c.TargetGeometryId.Trim()))
+                    {
+                        errors.Add(label + ": target_geometry_id \""
+                            + c.TargetGeometryId
+                            + "\" does not match any declared geometry id.");
                     }
 
-                    if (string.IsNullOrWhiteSpace(c.Domain))
-                        errors.Add(label + " (\"" + c.Name + "\"): domain is required.");
-
-                    // v1: shape is required and must be Round.
-                    if (string.IsNullOrWhiteSpace(c.Shape))
+                    // target_face is mandatory and must be one of the six named faces.
+                    if (string.IsNullOrWhiteSpace(c.TargetFace))
                     {
-                        errors.Add(label + " (\"" + c.Name + "\"): shape is required.");
+                        errors.Add(label + ": target_face is required.");
                     }
-                    else if (!string.Equals(c.Shape.Trim(), "Round", StringComparison.OrdinalIgnoreCase))
+                    else if (!validFaces.Contains(c.TargetFace.Trim()))
                     {
-                        errors.Add(label + " (\"" + c.Name
-                            + "\"): shape \"" + c.Shape
-                            + "\" is not supported in v1; use \"Round\".");
+                        errors.Add(label + ": target_face \"" + c.TargetFace
+                            + "\" is not valid; must be front, back, left, right, top, or bottom.");
                     }
 
-                    // v1: face is required and must be one of the six named faces.
-                    if (string.IsNullOrWhiteSpace(c.Face))
+                    // flow_direction is mandatory; must be in/out/bidirectional.
+                    if (string.IsNullOrWhiteSpace(c.FlowDirection))
                     {
-                        errors.Add(label + " (\"" + c.Name + "\"): face is required.");
+                        errors.Add(label + ": flow_direction is required.");
                     }
-                    else if (!validFaces.Contains(c.Face.Trim()))
+                    else if (!validFlows.Contains(c.FlowDirection.Trim()))
                     {
-                        errors.Add(label + " (\"" + c.Name
-                            + "\"): face \"" + c.Face
-                            + "\" is not valid; must be Front, Back, Left, Right, Top, or Bottom.");
-                    }
-
-                    // v1: location is required and must be Center.
-                    if (string.IsNullOrWhiteSpace(c.Location))
-                    {
-                        errors.Add(label + " (\"" + c.Name + "\"): location is required.");
-                    }
-                    else if (!string.Equals(c.Location.Trim(), "Center", StringComparison.OrdinalIgnoreCase))
-                    {
-                        errors.Add(label + " (\"" + c.Name
-                            + "\"): location \"" + c.Location
-                            + "\" is not supported in v1; use \"Center\".");
+                        errors.Add(label + ": flow_direction \"" + c.FlowDirection
+                            + "\" is not valid; must be in, out, or bidirectional.");
                     }
 
-                    // diameter_parameter must reference an existing parameter.
-                    if (!string.IsNullOrWhiteSpace(c.DiameterParameter)
-                        && !parameterNames.Contains(c.DiameterParameter))
+                    // system_classification is mandatory; closed list.
+                    if (string.IsNullOrWhiteSpace(c.SystemClassification))
                     {
-                        errors.Add(label + " (\"" + c.Name
-                            + "\"): diameter_parameter \""
-                            + c.DiameterParameter
-                            + "\" does not match any declared parameter.");
+                        errors.Add(label + ": system_classification is required.");
+                    }
+                    else if (!validSystems.Contains(c.SystemClassification.Trim()))
+                    {
+                        errors.Add(label + ": system_classification \""
+                            + c.SystemClassification
+                            + "\" is not valid; must be Global, SupplyAir, ReturnAir, ExhaustAir, or Fitting.");
+                    }
+
+                    // profile is mandatory; only Round supported in this PR.
+                    if (string.IsNullOrWhiteSpace(c.Profile))
+                    {
+                        errors.Add(label + ": profile is required.");
+                    }
+                    else if (!string.Equals(c.Profile.Trim(), "Round",
+                                 StringComparison.OrdinalIgnoreCase))
+                    {
+                        errors.Add(label + ": profile \"" + c.Profile
+                            + "\" is not supported in this PR; use \"Round\".");
+                    }
+
+                    // For Round connectors the diameter parameter is mandatory
+                    // and must match an existing family parameter.
+                    bool isRound = !string.IsNullOrWhiteSpace(c.Profile)
+                        && string.Equals(c.Profile.Trim(), "Round",
+                            StringComparison.OrdinalIgnoreCase);
+                    if (isRound)
+                    {
+                        if (string.IsNullOrWhiteSpace(c.DiameterParameter))
+                        {
+                            errors.Add(label
+                                + ": diameter_parameter is required when profile is Round.");
+                        }
+                        else if (!parameterNames.Contains(c.DiameterParameter.Trim()))
+                        {
+                            errors.Add(label + ": diameter_parameter \""
+                                + c.DiameterParameter
+                                + "\" does not match any declared parameter.");
+                        }
                     }
                 }
             }
