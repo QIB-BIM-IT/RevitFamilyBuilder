@@ -39,17 +39,16 @@ namespace RevitFamilyBuilder.Services
                 BuildStrategy  = "explicit_types",
 
                 // ── Parameters ──────────────────────────────────────────────────
-                // Only the parameters actually consumed by the current sample are
-                // declared: Width/Depth/Height drive the two-extrusion split.
-                // Connector/void-specific parameters were dropped together with
-                // the connector+void sections for this PR — they will come back
-                // in later PRs when connectors and voids target a specific
-                // geometry by id.
+                // Width / Depth / Height drive the two-extrusion split. Diameter
+                // drives both connectors simultaneously — pointing a single
+                // family parameter at two connectors is how a through-fitting
+                // maintains a consistent bore as Diameter flexes.
                 Parameters = new List<ParameterDefinition>
                 {
-                    new ParameterDefinition { Name = "Width",  Type = ParameterType.Length, Group = "Dimensions", IsInstance = false, DefaultValue = "600" },
-                    new ParameterDefinition { Name = "Depth",  Type = ParameterType.Length, Group = "Dimensions", IsInstance = false, DefaultValue = "400" },
-                    new ParameterDefinition { Name = "Height", Type = ParameterType.Length, Group = "Dimensions", IsInstance = false, DefaultValue = "300" }
+                    new ParameterDefinition { Name = "Width",    Type = ParameterType.Length, Group = "Dimensions", IsInstance = false, DefaultValue = "600" },
+                    new ParameterDefinition { Name = "Depth",    Type = ParameterType.Length, Group = "Dimensions", IsInstance = false, DefaultValue = "400" },
+                    new ParameterDefinition { Name = "Height",   Type = ParameterType.Length, Group = "Dimensions", IsInstance = false, DefaultValue = "300" },
+                    new ParameterDefinition { Name = "Diameter", Type = ParameterType.Length, Group = "Dimensions", IsInstance = false, DefaultValue = "200" }
                 },
 
                 // ── Reference planes ────────────────────────────────────────────
@@ -203,10 +202,38 @@ namespace RevitFamilyBuilder.Services
                 Voids = new List<VoidDefinition>(),
 
                 // ── Connectors ──────────────────────────────────────────────────
-                // Intentionally empty for the same reason as Voids above — the
-                // connector must declare which geometry it sits on. Re-introduced
-                // in a later PR with geometry_id targeting.
-                Connectors = new List<ConnectorDefinition>(),
+                // First use of the id → ElementId map created in the previous
+                // PR: each connector names the extrusion it lives on via
+                // target_geometry_id. Two round connectors on body_primary turn
+                // its half of the box into a miniature through-fitting:
+                //   • IN on the back face (target_face = back)
+                //   • OUT on the front face (target_face = front)
+                // Both point at the same Diameter parameter so the bore stays
+                // consistent when Diameter flexes. body_secondary stays bare
+                // intentionally — a future PR will add a clearance void there.
+                Connectors = new List<ConnectorDefinition>
+                {
+                    new ConnectorDefinition
+                    {
+                        Name                 = "primary_in",
+                        TargetGeometryId     = "body_primary",
+                        TargetFace           = "back",
+                        FlowDirection        = "in",
+                        SystemClassification = "Global",
+                        Profile              = "Round",
+                        DiameterParameter    = "Diameter"
+                    },
+                    new ConnectorDefinition
+                    {
+                        Name                 = "primary_out",
+                        TargetGeometryId     = "body_primary",
+                        TargetFace           = "front",
+                        FlowDirection        = "out",
+                        SystemClassification = "Global",
+                        Profile              = "Round",
+                        DiameterParameter    = "Diameter"
+                    }
+                },
 
                 Warnings = new List<string>
                 {
@@ -214,7 +241,7 @@ namespace RevitFamilyBuilder.Services
                     "Sample JSON — exercises explicit_types strategy with formula.",
                     "Height is formula-driven (Width / 2); FlexTest will skip it when testing directly.",
                     "Two extrusions share the Mid_LR reference plane — EQ(Left, Mid_LR, Right) keeps it centred during flex.",
-                    "Connectors and voids are intentionally empty in this sample until geometry-id targeting ships."
+                    "Two round connectors (In/Out) host on body_primary only; body_secondary stays bare for a future clearance void."
                 }
             };
         }
