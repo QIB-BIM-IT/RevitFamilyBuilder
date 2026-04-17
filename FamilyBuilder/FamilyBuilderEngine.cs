@@ -953,28 +953,41 @@ namespace RevitFamilyBuilder.FamilyBuilder
                     continue;
                 }
 
-                double? widthFt  = ResolveParameterValueFt(
-                    familyDoc, definition, geoDef.WidthParameter,  warnings);
-                double? depthFt  = ResolveParameterValueFt(
-                    familyDoc, definition, geoDef.DepthParameter,  warnings);
-                double? heightFt = ResolveParameterValueFt(
-                    familyDoc, definition, geoDef.HeightParameter, warnings);
+                // Resolve the six bounding reference planes for this
+                // geometry. Each slot falls back to the canonical name
+                // when the geometry does not override it, so legacy JSON
+                // that only declares a single centred box keeps working.
+                string leftName  = string.IsNullOrWhiteSpace(geoDef.LeftPlane)
+                    ? "Left"  : geoDef.LeftPlane.Trim();
+                string rightName = string.IsNullOrWhiteSpace(geoDef.RightPlane)
+                    ? "Right" : geoDef.RightPlane.Trim();
+                string frontName = string.IsNullOrWhiteSpace(geoDef.FrontPlane)
+                    ? "Front" : geoDef.FrontPlane.Trim();
+                string backName  = string.IsNullOrWhiteSpace(geoDef.BackPlane)
+                    ? "Back"  : geoDef.BackPlane.Trim();
+                string baseName  = string.IsNullOrWhiteSpace(geoDef.BasePlane)
+                    ? "Base"  : geoDef.BasePlane.Trim();
+                string topName   = string.IsNullOrWhiteSpace(geoDef.TopPlane)
+                    ? "Top"   : geoDef.TopPlane.Trim();
 
-                if (widthFt == null || depthFt == null || heightFt == null)
-                    continue;
-
-                double w = widthFt.Value;
-                double d = depthFt.Value;
-                double h = heightFt.Value;
-
-                if (w < 0.001 || d < 0.001 || h < 0.001)
+                ReferencePlane leftRp, rightRp, frontRp, backRp, baseRp, topRp;
+                if (!planesByName.TryGetValue(leftName,  out leftRp)
+                    || !planesByName.TryGetValue(rightName, out rightRp)
+                    || !planesByName.TryGetValue(frontName, out frontRp)
+                    || !planesByName.TryGetValue(backName,  out backRp)
+                    || !planesByName.TryGetValue(baseName,  out baseRp)
+                    || !planesByName.TryGetValue(topName,   out topRp))
                 {
-                    warnings.Add("Extrusion skipped: one or more resolved dimensions are zero or too small.");
+                    warnings.Add("Geometry \"" + (geoDef.Id ?? "<no-id>")
+                        + "\" skipped: one or more bounding reference planes "
+                        + "were not found in the family document.");
                     continue;
                 }
 
                 Extrusion ext = BuildRectangularExtrusion(
-                    familyDoc, w, d, h, planView, elevView, planesByName, warnings);
+                    familyDoc,
+                    leftRp, rightRp, frontRp, backRp, baseRp, topRp,
+                    planView, elevView, warnings);
 
                 if (ext == null) continue;
 
@@ -1020,7 +1033,10 @@ namespace RevitFamilyBuilder.FamilyBuilder
 
                 geometryDescriptors.Add(
                     (id.Length > 0 ? id : "<no-id>")
-                    + (subcatApplied != null ? " (" + subcatApplied + ")" : ""));
+                    + (subcatApplied != null ? " (" + subcatApplied + ")" : "")
+                    + " : [" + leftName + ", " + rightName
+                    + ", " + frontName + ", " + backName
+                    + ", " + baseName + ", " + topName + "]");
             }
 
             // Run a final regenerate to surface Revit warnings about coincident /
@@ -1126,8 +1142,14 @@ namespace RevitFamilyBuilder.FamilyBuilder
         }
 
         // Captures Revit failure messages that indicate coincident / overlapping
-        // / duplicate solids, routes them to the build-report warnings, and
-        // tells Revit to swallow them so the build is never blocked by a modal.
+        // / duplicate solids OR unsatisfied constraints between geometries and
+        // reference planes, routes them to the build-report warnings, and tells
+        // Revit to swallow them so the build is never blocked by a modal.
+        //
+        // Constraint-related keywords are caught here (rather than in a separate
+        // collector) so a single regenerate pass at the end of AddGeometry can
+        // surface both "two extrusions overlap" and "constraints not satisfied"
+        // issues in one place.
         private sealed class CoincidentGeometryWarningCollector : IFailuresPreprocessor
         {
             private readonly IList<string> _warnings;
@@ -1146,11 +1168,24 @@ namespace RevitFamilyBuilder.FamilyBuilder
                     if (string.IsNullOrWhiteSpace(desc)) continue;
 
                     string lower = desc.ToLowerInvariant();
-                    if (lower.Contains("coincid") || lower.Contains("overlap")
-                        || lower.Contains("identical") || lower.Contains("duplicate")
-                        || lower.Contains("joined"))
+
+                    bool overlap =
+                        lower.Contains("coincid")   || lower.Contains("overlap")
+                     || lower.Contains("identical") || lower.Contains("duplicate")
+                     || lower.Contains("joined");
+
+                    bool constraint =
+                        lower.Contains("constraint")  || lower.Contains("consistent")
+                     || lower.Contains("satisf")      || lower.Contains("over-constrain");
+
+                    if (overlap)
                     {
                         _warnings.Add("Geometry overlap warning: " + desc);
+                        accessor.DeleteWarning(msg);
+                    }
+                    else if (constraint)
+                    {
+                        _warnings.Add("Constraint warning: " + desc);
                         accessor.DeleteWarning(msg);
                     }
                 }
@@ -1163,24 +1198,58 @@ namespace RevitFamilyBuilder.FamilyBuilder
         // This is the SINGLE code path for creating a locked rectangular extrusion.
         // All geometry requests of type "Extrusion" must go through here.
         //
+        // The initial profile and extrusion depth are derived from the ACTUAL
+        // positions of the six bounding reference planes passed in by the caller.
+        // This allows two geometries to share a reference plane in the middle
+        // (e.g. body_primary bounded by [Left, Mid_LR, ...] and body_secondary
+        // bounded by [Mid_LR, Right, ...]) and each be locked to its own plane
+        // set.
+        //
         // Guarantees:
-        //   • Rectangular profile (w × d) centred at origin, extruded along +Z to h
-        //   • 4 lateral faces locked to Left / Right / Front / Back reference planes
+        //   • Rectangular profile spans [leftRp..rightRp] × [frontRp..backRp]
+        //     at Z = baseRp, extruded up to Z = topRp
+        //   • 4 lateral faces locked to the declared left/right/front/back planes
         //     (via NewAlignment in plan view)
-        //   • Bottom face locked to "Base" reference plane in elevation view
-        //   • Top face locked to "Top" reference plane in elevation view
+        //   • Bottom face locked to the declared base plane in elevation view
+        //   • Top face locked to the declared top plane in elevation view
         //   • The two alignment transactions are independent so a failed face lock
         //     never rolls back the committed solid
         //
-        // For the Top/Bottom locks to succeed the "Base" and "Top" reference planes
+        // For the Top/Bottom locks to succeed the "base" and "top" reference planes
         // MUST have been created with Orientation = "elevation" (Z-normal planes).
         private static Extrusion BuildRectangularExtrusion(
             Document familyDoc,
-            double w, double d, double h,
+            ReferencePlane leftRp, ReferencePlane rightRp,
+            ReferencePlane frontRp, ReferencePlane backRp,
+            ReferencePlane baseRp, ReferencePlane topRp,
             View planView, View elevView,
-            Dictionary<string, ReferencePlane> planesByName,
             IList<string> warnings)
         {
+            // Read the actual positions of the bounding planes in the live
+            // family document. Each plane's origin projected onto the relevant
+            // axis gives the coordinate of the face it will drive.
+            double xLeft  = leftRp.GetPlane().Origin.X;
+            double xRight = rightRp.GetPlane().Origin.X;
+            double yFront = frontRp.GetPlane().Origin.Y;
+            double yBack  = backRp.GetPlane().Origin.Y;
+            double zBase  = baseRp.GetPlane().Origin.Z;
+            double zTop   = topRp.GetPlane().Origin.Z;
+
+            double xMin = Math.Min(xLeft,  xRight);
+            double xMax = Math.Max(xLeft,  xRight);
+            double yMin = Math.Min(yFront, yBack);
+            double yMax = Math.Max(yFront, yBack);
+            double zMin = Math.Min(zBase,  zTop);
+            double zMax = Math.Max(zBase,  zTop);
+
+            double height = zMax - zMin;
+            if ((xMax - xMin) < 0.001 || (yMax - yMin) < 0.001 || height < 0.001)
+            {
+                warnings.Add("Extrusion skipped: one or more bounding reference "
+                    + "planes are coincident (zero-thickness box).");
+                return null;
+            }
+
             Extrusion ext = null;
 
             // ── Step 1: create the solid extrusion ────────────────────────────────
@@ -1194,13 +1263,10 @@ namespace RevitFamilyBuilder.FamilyBuilder
                 tx.Start();
                 try
                 {
-                    double halfW = w / 2.0;
-                    double halfD = d / 2.0;
-
-                    XYZ p1 = new XYZ(-halfW, -halfD, 0);
-                    XYZ p2 = new XYZ( halfW, -halfD, 0);
-                    XYZ p3 = new XYZ( halfW,  halfD, 0);
-                    XYZ p4 = new XYZ(-halfW,  halfD, 0);
+                    XYZ p1 = new XYZ(xMin, yMin, zMin);
+                    XYZ p2 = new XYZ(xMax, yMin, zMin);
+                    XYZ p3 = new XYZ(xMax, yMax, zMin);
+                    XYZ p4 = new XYZ(xMin, yMax, zMin);
 
                     CurveArray loop = new CurveArray();
                     loop.Append(Line.CreateBound(p1, p2));
@@ -1211,11 +1277,15 @@ namespace RevitFamilyBuilder.FamilyBuilder
                     CurveArrArray profile = new CurveArrArray();
                     profile.Append(loop);
 
+                    // Sketch plane sits on the base elevation so the extrusion
+                    // grows from zMin (base) up to zMax (top).
                     SketchPlane sketchPlane = SketchPlane.Create(
                         familyDoc,
-                        Plane.CreateByNormalAndOrigin(XYZ.BasisZ, XYZ.Zero));
+                        Plane.CreateByNormalAndOrigin(
+                            XYZ.BasisZ, new XYZ(0, 0, zMin)));
 
-                    ext = familyDoc.FamilyCreate.NewExtrusion(true, profile, sketchPlane, h);
+                    ext = familyDoc.FamilyCreate.NewExtrusion(
+                        true, profile, sketchPlane, height);
                     tx.Commit();
                 }
                 catch (Exception ex)
@@ -1236,7 +1306,9 @@ namespace RevitFamilyBuilder.FamilyBuilder
                 {
                     txAlign.Start();
                     TryAlignExtrusionToReferencePlanes(
-                        familyDoc, ext, planView, elevView, planesByName, warnings);
+                        familyDoc, ext, planView, elevView,
+                        leftRp, rightRp, frontRp, backRp, baseRp, topRp,
+                        warnings);
                     txAlign.Commit();
                 }
             }
@@ -2054,18 +2126,23 @@ namespace RevitFamilyBuilder.FamilyBuilder
             return null;
         }
 
-        // Creates NewAlignment constraints between the six planar faces of a rectangular
-        // extrusion and the standard named reference planes
-        // (Left, Right, Front, Back in plan view; Top, Base in elevation view).
+        // Creates NewAlignment constraints between the six planar faces of a
+        // rectangular extrusion and the six reference planes passed in by the
+        // caller. The face-normal → plane map is slot-based (±X, ±Y, ±Z), NOT
+        // keyed on canonical names, so two geometries can lock their adjacent
+        // faces to the same shared reference plane while keeping their opposite
+        // faces locked to different planes.
         //
-        // Each alignment is attempted independently so one failure does not abort the
-        // others.  Caller must supply an open transaction.
+        // Each alignment is attempted independently so one failure does not
+        // abort the others. Caller must supply an open transaction.
         private static void TryAlignExtrusionToReferencePlanes(
             Document familyDoc,
             Extrusion extrusion,
             View planView,
             View elevView,
-            Dictionary<string, ReferencePlane> planesByName,
+            ReferencePlane leftRp, ReferencePlane rightRp,
+            ReferencePlane frontRp, ReferencePlane backRp,
+            ReferencePlane baseRp, ReferencePlane topRp,
             IList<string> warnings)
         {
             if (planView == null)
@@ -2094,21 +2171,19 @@ namespace RevitFamilyBuilder.FamilyBuilder
                         PlanarFace pf = face as PlanarFace;
                         if (pf == null) continue;
 
-                        XYZ    n         = pf.FaceNormal;
-                        string planeName = null;
-                        View   alignView = null;
+                        XYZ            n         = pf.FaceNormal;
+                        ReferencePlane rp        = null;
+                        View           alignView = null;
+                        string         slotLabel = null;
 
-                        if      (n.X < -0.9) { planeName = "Left";   alignView = planView; }
-                        else if (n.X >  0.9) { planeName = "Right";  alignView = planView; }
-                        else if (n.Y < -0.9) { planeName = "Front";  alignView = planView; }
-                        else if (n.Y >  0.9) { planeName = "Back";   alignView = planView; }
-                        else if (n.Z < -0.9) { planeName = "Base";   alignView = elevView; }
-                        else if (n.Z >  0.9) { planeName = "Top";    alignView = elevView; }
+                        if      (n.X < -0.9) { rp = leftRp;  alignView = planView; slotLabel = "left";  }
+                        else if (n.X >  0.9) { rp = rightRp; alignView = planView; slotLabel = "right"; }
+                        else if (n.Y < -0.9) { rp = frontRp; alignView = planView; slotLabel = "front"; }
+                        else if (n.Y >  0.9) { rp = backRp;  alignView = planView; slotLabel = "back";  }
+                        else if (n.Z < -0.9) { rp = baseRp;  alignView = elevView; slotLabel = "base";  }
+                        else if (n.Z >  0.9) { rp = topRp;   alignView = elevView; slotLabel = "top";   }
 
-                        if (planeName == null || alignView == null) continue;
-
-                        ReferencePlane rp;
-                        if (!planesByName.TryGetValue(planeName, out rp)) continue;
+                        if (rp == null || alignView == null) continue;
 
                         try
                         {
@@ -2117,7 +2192,8 @@ namespace RevitFamilyBuilder.FamilyBuilder
                         }
                         catch (Exception ex)
                         {
-                            warnings.Add("Alignment (" + planeName + "): " + ex.Message);
+                            warnings.Add("Alignment (" + slotLabel + " -> \""
+                                + rp.Name + "\"): " + ex.Message);
                         }
                     }
                 }
