@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using Newtonsoft.Json;
 
 namespace RevitFamilyBuilder.Schema
 {
@@ -12,6 +13,10 @@ namespace RevitFamilyBuilder.Schema
         public List<ReferencePlaneDefinition> ReferencePlanes { get; set; }
         public List<DimensionDefinition> Dimensions { get; set; }
         public List<SymbolicLineDefinition> SymbolicLines { get; set; }
+
+        // Accept both the new array form (preferred) and the legacy single-object
+        // form so older payloads keep parsing. See SingleOrArrayListConverter.
+        [JsonConverter(typeof(SingleOrArrayListConverter<GeometryDefinition>))]
         public List<GeometryDefinition> Geometry { get; set; }
         public List<FormulaDefinition> Formulas { get; set; }
         public List<FamilyTypeDefinition> Types { get; set; }

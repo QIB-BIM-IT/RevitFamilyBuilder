@@ -113,19 +113,62 @@ namespace RevitFamilyBuilder.Services
             }
             else
             {
-                foreach (GeometryDefinition geo in definition.Geometry)
+                // The engine's rectangular extrusion builder locks faces to the
+                // six canonical named planes. Validate that those exist in the
+                // pool before build time, so every geometry entry in the array
+                // can actually build.
+                string[] requiredPlanes =
+                    { "Left", "Right", "Front", "Back", "Base", "Top" };
+
+                var geometryNames = new HashSet<string>(
+                    StringComparer.OrdinalIgnoreCase);
+
+                // Avoid duplicate plane-missing errors across geometry entries —
+                // every geometry shares the same canonical pool today.
+                var reportedMissingPlanes = new HashSet<string>(
+                    StringComparer.OrdinalIgnoreCase);
+
+                for (int i = 0; i < definition.Geometry.Count; i++)
                 {
+                    GeometryDefinition geo = definition.Geometry[i];
+                    string label = "geometry[" + i + "]";
+
+                    if (string.IsNullOrWhiteSpace(geo.Name))
+                    {
+                        errors.Add(label + ": name must not be empty.");
+                    }
+                    else if (!geometryNames.Add(geo.Name))
+                    {
+                        errors.Add(label + ": duplicate geometry name \""
+                            + geo.Name + "\".");
+                    }
+
                     if (string.IsNullOrWhiteSpace(geo.Profile))
-                        errors.Add("A geometry item has an empty profile.");
+                        errors.Add(label + ": profile must not be empty.");
 
                     if (!parameterNames.Contains(geo.WidthParameter))
-                        errors.Add("Geometry references unknown width parameter: \"" + geo.WidthParameter + "\".");
+                        errors.Add(label + ": references unknown width parameter: \""
+                            + geo.WidthParameter + "\".");
 
                     if (!parameterNames.Contains(geo.DepthParameter))
-                        errors.Add("Geometry references unknown depth parameter: \"" + geo.DepthParameter + "\".");
+                        errors.Add(label + ": references unknown depth parameter: \""
+                            + geo.DepthParameter + "\".");
 
                     if (!parameterNames.Contains(geo.HeightParameter))
-                        errors.Add("Geometry references unknown height parameter: \"" + geo.HeightParameter + "\".");
+                        errors.Add(label + ": references unknown height parameter: \""
+                            + geo.HeightParameter + "\".");
+
+                    // Each geometry in the array must be able to resolve its
+                    // bounding reference planes from the pool.
+                    foreach (string required in requiredPlanes)
+                    {
+                        if (planeNames.Contains(required)) continue;
+                        if (!reportedMissingPlanes.Add(required)) continue;
+
+                        errors.Add(label
+                            + ": required bounding reference plane \""
+                            + required + "\" is not declared in reference_planes.");
+                    }
                 }
             }
 
