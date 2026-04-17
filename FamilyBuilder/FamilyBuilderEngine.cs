@@ -2055,6 +2055,11 @@ namespace RevitFamilyBuilder.FamilyBuilder
                 sb.AppendLine();
             }
 
+            // Delete any stale CSV from a previous run so the header annotations
+            // (##OTHER##, ##LENGTH##MILLIMETERS) always match what size_lookup expects.
+            if (File.Exists(csvPath))
+                File.Delete(csvPath);
+
             // UTF-8 WITHOUT BOM — Revit's ImportSizeTable rejects files that start with a BOM.
             File.WriteAllText(csvPath, sb.ToString(), new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
             return csvPath;
