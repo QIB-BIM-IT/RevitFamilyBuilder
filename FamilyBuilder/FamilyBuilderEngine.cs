@@ -1898,13 +1898,17 @@ namespace RevitFamilyBuilder.FamilyBuilder
                     continue;
                 }
 
-                // ── Profile guard: this PR supports only Round ────────────────
-                string profile = (connDef.Profile ?? string.Empty).Trim();
-                if (!string.Equals(profile, "Round",
-                        StringComparison.OrdinalIgnoreCase))
+                // ── Profile guard: Round | Rectangular ────────────────────────
+                string profile      = (connDef.Profile ?? string.Empty).Trim();
+                bool   isRound      = string.Equals(profile, "Round",
+                                          StringComparison.OrdinalIgnoreCase);
+                bool   isRectangular= string.Equals(profile, "Rectangular",
+                                          StringComparison.OrdinalIgnoreCase);
+
+                if (!isRound && !isRectangular)
                 {
                     warnings.Add(label + ": profile \"" + connDef.Profile
-                        + "\" is not supported in this PR; use \"Round\".");
+                        + "\" is not supported; use \"Round\" or \"Rectangular\".");
                     continue;
                 }
 
@@ -1920,31 +1924,98 @@ namespace RevitFamilyBuilder.FamilyBuilder
                 DuctSystemType    sysType = ParseDuctSystemType(connDef.SystemClassification);
                 FlowDirectionType flow    = ParseFlowDirection(connDef.FlowDirection);
 
-                // ── Create the connector and apply flow / diameter ────────────
+                // ── Create the connector and apply flow / size association ────
                 using (Transaction tx = new Transaction(
                     familyDoc, "Add Connector: " + geoId + "." + faceName))
                 {
                     tx.Start();
                     try
                     {
+                        ConnectorProfileType profileType = isRound
+                            ? ConnectorProfileType.Round
+                            : ConnectorProfileType.Rectangular;
+
                         ConnectorElement ce = ConnectorElement.CreateDuctConnector(
-                            familyDoc, sysType, ConnectorProfileType.Round, faceRef);
+                            familyDoc, sysType, profileType, faceRef);
 
                         // Flow direction: ConnectorElement.Direction is
                         // get-only, so drive it through the BuiltInParameter.
                         TrySetFlowDirection(ce, flow, label, warnings);
 
-                        // Bind the connector size to the named family parameter.
-                        if (!string.IsNullOrWhiteSpace(connDef.DiameterParameter))
+                        // Extra diagnostic bits (only used for Rectangular).
+                        string sizeDesc = null;
+
+                        if (isRound)
                         {
-                            FamilyParameter diamFp;
-                            if (paramsByName.TryGetValue(
-                                    connDef.DiameterParameter.Trim(), out diamFp))
-                                TryBindConnectorSizeParameter(
-                                    fm, ce, diamFp, label, warnings);
-                            else
-                                warnings.Add(label + ": diameter_parameter \""
-                                    + connDef.DiameterParameter + "\" not found.");
+                            // ── Round path — unchanged (PR 4 behaviour) ──────
+                            if (!string.IsNullOrWhiteSpace(connDef.DiameterParameter))
+                            {
+                                FamilyParameter diamFp;
+                                if (paramsByName.TryGetValue(
+                                        connDef.DiameterParameter.Trim(), out diamFp))
+                                    TryBindConnectorSizeParameter(
+                                        fm, ce, diamFp, label, warnings);
+                                else
+                                    warnings.Add(label + ": diameter_parameter \""
+                                        + connDef.DiameterParameter + "\" not found.");
+                            }
+                        }
+                        else // isRectangular
+                        {
+                            // ── Rectangular path — strict ordering ───────────
+                            //
+                            // The Revit API exposes CONNECTOR_WIDTH /
+                            // CONNECTOR_HEIGHT on a newly-created rectangular
+                            // connector, but those parameters are only usable
+                            // AFTER a document regenerate. Likewise, the
+                            // family-parameter association only propagates
+                            // the size to the connector after a second
+                            // regenerate. Both steps are captured by rules
+                            // added to AGENTS.md.
+                            familyDoc.Regenerate();
+
+                            // Access the connector's own Width / Height parameters.
+                            Parameter ceWidth  = ce.get_Parameter(
+                                BuiltInParameter.CONNECTOR_WIDTH);
+                            Parameter ceHeight = ce.get_Parameter(
+                                BuiltInParameter.CONNECTOR_HEIGHT);
+
+                            // Resolve target family parameters.
+                            FamilyParameter widthFp  = null;
+                            FamilyParameter heightFp = null;
+
+                            if (!string.IsNullOrWhiteSpace(connDef.WidthParameter))
+                            {
+                                if (!paramsByName.TryGetValue(
+                                        connDef.WidthParameter.Trim(), out widthFp))
+                                    warnings.Add(label + ": width_parameter \""
+                                        + connDef.WidthParameter + "\" not found.");
+                            }
+                            if (!string.IsNullOrWhiteSpace(connDef.HeightParameter))
+                            {
+                                if (!paramsByName.TryGetValue(
+                                        connDef.HeightParameter.Trim(), out heightFp))
+                                    warnings.Add(label + ": height_parameter \""
+                                        + connDef.HeightParameter + "\" not found.");
+                            }
+
+                            // Associate Width and Height independently so a
+                            // failure on one does not prevent the other.
+                            bool widthOk = TryAssociateConnectorBuiltIn(
+                                fm, ceWidth, widthFp, "Width", label, warnings);
+                            bool heightOk = TryAssociateConnectorBuiltIn(
+                                fm, ceHeight, heightFp, "Height", label, warnings);
+
+                            // Second regenerate so Revit pushes the associated
+                            // family-parameter VALUES onto the connector. Without
+                            // this, selecting the connector in Revit may show
+                            // the association mark but a stale default size.
+                            familyDoc.Regenerate();
+
+                            sizeDesc = "W="
+                                + (widthOk ? connDef.WidthParameter : "?")
+                                + ", H="
+                                + (heightOk ? connDef.HeightParameter : "?");
                         }
 
                         tx.Commit();
@@ -1962,12 +2033,23 @@ namespace RevitFamilyBuilder.FamilyBuilder
 
                         // Diagnostic line — proves the connector sits on the
                         // targeted geometry's face, not the family centre.
-                        string diamTxt = FormatBoundDiameter(
-                            fm, connDef.DiameterParameter);
+                        string profileLabel = isRound ? "Round" : "Rectangular";
+                        string sizeSuffix;
+                        if (isRound)
+                        {
+                            string diamTxt = FormatBoundDiameter(
+                                fm, connDef.DiameterParameter);
+                            sizeSuffix = (diamTxt != null) ? ", " + diamTxt : "";
+                        }
+                        else
+                        {
+                            sizeSuffix = ", " + sizeDesc;
+                        }
+
                         connectorDescriptors.Add(
                             label + ": " + geoId + "." + faceName.ToLowerInvariant()
-                            + " (" + flow + ", " + sysType + ", Round"
-                            + (diamTxt != null ? ", " + diamTxt : "")
+                            + " (" + flow + ", " + sysType + ", " + profileLabel
+                            + sizeSuffix
                             + ") @ " + FormatFaceCentreMm(faceCentre));
                     }
                     catch (Exception ex)
@@ -2296,6 +2378,52 @@ namespace RevitFamilyBuilder.FamilyBuilder
                 lastException = ex;
                 return false;
             }
+        }
+
+        // Associates a single named BuiltInParameter on a rectangular connector
+        // (CONNECTOR_WIDTH or CONNECTOR_HEIGHT) to the target family parameter.
+        //
+        // Unlike the Round path — where CONNECTOR_RADIUS is sometimes shadowed
+        // by a renamed / version-specific BIP and requires keyword fallback —
+        // CONNECTOR_WIDTH and CONNECTOR_HEIGHT are consistently exposed on a
+        // rectangular connector AFTER a doc.Regenerate() (see AGENTS.md). No
+        // fallback sweep is needed; if the BIP is null or read-only we treat
+        // it as a non-blocking warning rather than an exception.
+        private static bool TryAssociateConnectorBuiltIn(
+            FamilyManager fm,
+            Parameter elementParam,
+            FamilyParameter familyParam,
+            string slotLabel,
+            string diagnosticLabel,
+            IList<string> warnings)
+        {
+            if (familyParam == null)
+                return false; // missing-parameter warning was already logged.
+
+            if (elementParam == null)
+            {
+                warnings.Add(diagnosticLabel + ": " + slotLabel
+                    + " built-in parameter not accessible on connector "
+                    + "(missing doc.Regenerate after creation?).");
+                return false;
+            }
+
+            if (elementParam.IsReadOnly)
+            {
+                warnings.Add(diagnosticLabel + ": " + slotLabel
+                    + " built-in parameter is read-only; association skipped.");
+                return false;
+            }
+
+            Exception lastEx;
+            if (TryAssociateParameter(fm, elementParam, familyParam, out lastEx))
+                return true;
+
+            warnings.Add(diagnosticLabel + ": association failed for "
+                + slotLabel + " → family parameter \""
+                + familyParam.Definition.Name + "\": "
+                + (lastEx != null ? lastEx.Message : "unknown error"));
+            return false;
         }
 
         // ── Parametric alignment helpers ─────────────────────────────────────────
