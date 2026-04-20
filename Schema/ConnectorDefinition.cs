@@ -6,7 +6,10 @@ namespace RevitFamilyBuilder.Schema
     /// Each connector is independent — pairing (e.g. an In + Out fitting)
     /// is NOT expressed as a single entry here; it is modelled as two
     /// separate connector entries that share the same
-    /// <see cref="TargetGeometryId"/> and <see cref="DiameterParameter"/>.
+    /// <see cref="TargetGeometryId"/> and the same sizing parameters
+    /// (<see cref="DiameterParameter"/> for Round,
+    ///  <see cref="WidthParameter"/> + <see cref="HeightParameter"/> for
+    /// Rectangular).
     /// </summary>
     public class ConnectorDefinition
     {
@@ -48,17 +51,44 @@ namespace RevitFamilyBuilder.Schema
         public string SystemClassification { get; set; }
 
         /// <summary>
-        /// Connector profile. Only <c>Round</c> is supported in this PR —
-        /// rectangular connectors will be introduced later. When
-        /// <c>Round</c>, <see cref="DiameterParameter"/> is required.
+        /// Connector profile. Accepted values (case insensitive):
+        /// <list type="bullet">
+        ///   <item>
+        ///     <description><c>Round</c> — requires
+        ///     <see cref="DiameterParameter"/>; width/height parameters must
+        ///     be left empty.</description>
+        ///   </item>
+        ///   <item>
+        ///     <description><c>Rectangular</c> — requires
+        ///     <see cref="WidthParameter"/> AND <see cref="HeightParameter"/>;
+        ///     diameter parameter must be left empty.</description>
+        ///   </item>
+        /// </list>
         /// </summary>
         public string Profile { get; set; }
 
         /// <summary>
         /// Name of the family parameter that drives the connector's diameter
-        /// (required when <see cref="Profile"/> is <c>Round</c>). Two
-        /// connectors pointing at the same parameter flex together.
+        /// (required when <see cref="Profile"/> is <c>Round</c>, forbidden
+        /// otherwise). Two connectors pointing at the same parameter flex
+        /// together.
         /// </summary>
         public string DiameterParameter { get; set; }
+
+        /// <summary>
+        /// Name of the family parameter that drives the connector's width
+        /// (required when <see cref="Profile"/> is <c>Rectangular</c>,
+        /// forbidden otherwise). Typically the family's <c>Width</c>
+        /// parameter, so the connector flexes with the host extrusion.
+        /// </summary>
+        public string WidthParameter { get; set; }
+
+        /// <summary>
+        /// Name of the family parameter that drives the connector's height
+        /// (required when <see cref="Profile"/> is <c>Rectangular</c>,
+        /// forbidden otherwise). Typically the family's <c>Height</c>
+        /// parameter.
+        /// </summary>
+        public string HeightParameter { get; set; }
     }
 }

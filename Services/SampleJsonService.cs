@@ -39,16 +39,16 @@ namespace RevitFamilyBuilder.Services
                 BuildStrategy  = "explicit_types",
 
                 // ── Parameters ──────────────────────────────────────────────────
-                // Width / Depth / Height drive the two-extrusion split. Diameter
-                // drives both connectors simultaneously — pointing a single
-                // family parameter at two connectors is how a through-fitting
-                // maintains a consistent bore as Diameter flexes.
+                // Width / Depth / Height drive the single extrusion AND the two
+                // rectangular connectors. There is intentionally no Diameter
+                // parameter: this sample exercises the Rectangular connector
+                // path introduced in this PR, which uses width_parameter +
+                // height_parameter instead.
                 Parameters = new List<ParameterDefinition>
                 {
-                    new ParameterDefinition { Name = "Width",    Type = ParameterType.Length, Group = "Dimensions", IsInstance = false, DefaultValue = "600" },
-                    new ParameterDefinition { Name = "Depth",    Type = ParameterType.Length, Group = "Dimensions", IsInstance = false, DefaultValue = "400" },
-                    new ParameterDefinition { Name = "Height",   Type = ParameterType.Length, Group = "Dimensions", IsInstance = false, DefaultValue = "300" },
-                    new ParameterDefinition { Name = "Diameter", Type = ParameterType.Length, Group = "Dimensions", IsInstance = false, DefaultValue = "200" }
+                    new ParameterDefinition { Name = "Width",  Type = ParameterType.Length, Group = "Dimensions", IsInstance = false, DefaultValue = "600" },
+                    new ParameterDefinition { Name = "Depth",  Type = ParameterType.Length, Group = "Dimensions", IsInstance = false, DefaultValue = "400" },
+                    new ParameterDefinition { Name = "Height", Type = ParameterType.Length, Group = "Dimensions", IsInstance = false, DefaultValue = "300" }
                 },
 
                 // ── Reference planes ────────────────────────────────────────────
@@ -59,11 +59,15 @@ namespace RevitFamilyBuilder.Services
                 // Z-normal planes visible in the front-elevation view.  These are the
                 // ONLY planes that can correctly constrain the extrusion top/bottom faces.
                 //
-                // Mid_LR is the central vertical plane shared by the two extrusions
-                // body_primary and body_secondary. Placing it at offset 0 puts it
-                // exactly midway between Left (-300) and Right (+300), which is the
-                // precondition Revit requires before an EQ constraint can lock it
-                // to the midpoint. Center_FB stays as the Y-axis symmetry anchor.
+                // Mid_LR stays in the pool to keep the EQ(Left, Mid_LR, Right)
+                // constraint expressible — a deliberate carry-over from PR 3.
+                // In this PR's sample the geometry spans the full width, so
+                // Mid_LR is not used as a bounding plane; the EQ constraint is
+                // still satisfied (Mid_LR's offset=0 is already the midpoint),
+                // so no "constraint unsatisfied" warning is expected.
+                //
+                // Multi-geometry (two extrusions sharing Mid_LR) will return in
+                // a later PR that introduces derived parameters for Width/2.
                 ReferencePlanes = new List<ReferencePlaneDefinition>
                 {
                     new ReferencePlaneDefinition { Name = "Center_FB", Orientation = "horizontal", Offset =    0.0 },
@@ -83,16 +87,10 @@ namespace RevitFamilyBuilder.Services
                 // ── Dimensions ──────────────────────────────────────────────────
                 // Three labelled dimensions drive Width, Depth, Height.
                 // Two EQ dimensions enforce symmetry:
-                //   • Left ↔ Mid_LR ↔ Right  locks Mid_LR to the LR midpoint
-                //     so the two extrusions sharing Mid_LR always occupy
-                //     equal halves of Width.
+                //   • Left ↔ Mid_LR ↔ Right  keeps Mid_LR centred for when
+                //     multi-geometry returns.
                 //   • Front ↔ Center_FB ↔ Back locks the family's Y-axis
                 //     symmetry as before.
-                //
-                // EQ dimension rules:
-                //   • ReferencePlaneMiddle must name the middle plane.
-                //   • IsEqual = true marks every segment as IsEqualDriven.
-                //   • Leave ParameterName empty on EQ dims (no label, only constraint).
                 Dimensions = new List<DimensionDefinition>
                 {
                     new DimensionDefinition { ReferencePlane1 = "Left",  ReferencePlane2 = "Right", ParameterName = "Width"  },
@@ -115,19 +113,15 @@ namespace RevitFamilyBuilder.Services
                 },
 
                 // ── Geometry ────────────────────────────────────────────────────
-                // First real geometric differentiation: two rectangular extrusions
-                // sitting SIDE BY SIDE, sharing Mid_LR as their inner boundary.
+                // Temporarily back to ONE extrusion for this PR. The Rectangular
+                // connector path is new, so we isolate it by giving it a simple,
+                // full-width host; this also avoids the "each sub-extrusion is
+                // half of Width" problem, which will be handled in a later PR
+                // once we have derived parameters (Width/2 per sub-component).
                 //
-                //   body_primary   bounded by [Left,   Mid_LR, Front, Back, Base, Top]
-                //                  → occupies the LEFT half of Width.
-                //   body_secondary bounded by [Mid_LR, Right,  Front, Back, Base, Top]
-                //                  → occupies the RIGHT half of Width.
-                //
-                // The "Left ↔ Mid_LR ↔ Right" EQ dimension keeps Mid_LR centred
-                // while Width flexes, so each half always renders at Width / 2.
-                //
-                // Both geometries request the Body subcategory to exercise the
-                // create-once / reuse path from the previous PR.
+                // The multi-geometry infrastructure (arrays, id map, per-geometry
+                // plane overrides, shared-plane EQ) is unchanged — we simply
+                // instantiate a single entry using the canonical default planes.
                 Geometry = new List<GeometryDefinition>
                 {
                     new GeometryDefinition
@@ -139,22 +133,9 @@ namespace RevitFamilyBuilder.Services
                         WidthParameter  = "Width",
                         DepthParameter  = "Depth",
                         HeightParameter = "Height",
-                        LeftPlane       = "Left",
-                        RightPlane      = "Mid_LR",
-                        Symmetry        = new List<string> { "FB" }
-                    },
-                    new GeometryDefinition
-                    {
-                        Id              = "body_secondary",
-                        Subcategory     = "Body",
-                        Type            = GeometryType.Extrusion,
-                        Profile         = "rectangular",
-                        WidthParameter  = "Width",
-                        DepthParameter  = "Depth",
-                        HeightParameter = "Height",
-                        LeftPlane       = "Mid_LR",
-                        RightPlane      = "Right",
-                        Symmetry        = new List<string> { "FB" }
+                        // No LeftPlane / RightPlane overrides — the validator
+                        // falls back to canonical "Left" / "Right" / etc.
+                        Symmetry        = new List<string> { "LR", "FB" }
                     }
                 },
 
@@ -196,21 +177,17 @@ namespace RevitFamilyBuilder.Services
                 },
 
                 // ── Voids ───────────────────────────────────────────────────────
-                // Intentionally empty in this PR. A void cuts a specific extrusion
-                // face; now that there are two extrusions, void targeting must be
-                // expressed by geometry_id. That work is scheduled for a later PR.
+                // Intentionally empty in this PR.
                 Voids = new List<VoidDefinition>(),
 
                 // ── Connectors ──────────────────────────────────────────────────
-                // First use of the id → ElementId map created in the previous
-                // PR: each connector names the extrusion it lives on via
-                // target_geometry_id. Two round connectors on body_primary turn
-                // its half of the box into a miniature through-fitting:
-                //   • IN on the back face (target_face = back)
-                //   • OUT on the front face (target_face = front)
-                // Both point at the same Diameter parameter so the bore stays
-                // consistent when Diameter flexes. body_secondary stays bare
-                // intentionally — a future PR will add a clearance void there.
+                // Minimal rectangular fire-damper pattern:
+                //   • IN on the back face  (normal +Y)
+                //   • OUT on the front face (normal -Y)
+                // Both connectors associate their Width to the family's Width
+                // parameter and their Height to Height, so flexing Width or
+                // Height in Family Types flexes the extrusion AND the two
+                // connectors simultaneously.
                 Connectors = new List<ConnectorDefinition>
                 {
                     new ConnectorDefinition
@@ -220,8 +197,9 @@ namespace RevitFamilyBuilder.Services
                         TargetFace           = "back",
                         FlowDirection        = "in",
                         SystemClassification = "Global",
-                        Profile              = "Round",
-                        DiameterParameter    = "Diameter"
+                        Profile              = "Rectangular",
+                        WidthParameter       = "Width",
+                        HeightParameter      = "Height"
                     },
                     new ConnectorDefinition
                     {
@@ -230,8 +208,9 @@ namespace RevitFamilyBuilder.Services
                         TargetFace           = "front",
                         FlowDirection        = "out",
                         SystemClassification = "Global",
-                        Profile              = "Round",
-                        DiameterParameter    = "Diameter"
+                        Profile              = "Rectangular",
+                        WidthParameter       = "Width",
+                        HeightParameter      = "Height"
                     }
                 },
 
@@ -240,8 +219,8 @@ namespace RevitFamilyBuilder.Services
                     "Sample JSON only — not generated by AI.",
                     "Sample JSON — exercises explicit_types strategy with formula.",
                     "Height is formula-driven (Width / 2); FlexTest will skip it when testing directly.",
-                    "Two extrusions share the Mid_LR reference plane — EQ(Left, Mid_LR, Right) keeps it centred during flex.",
-                    "Two round connectors (In/Out) host on body_primary only; body_secondary stays bare for a future clearance void."
+                    "Single full-width extrusion in this PR — multi-geometry returns once derived parameters (Width/2 per sub-component) are introduced.",
+                    "Two Rectangular connectors (In/Out) on body_primary, associated to family parameters Width and Height."
                 }
             };
         }

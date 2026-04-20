@@ -343,25 +343,35 @@ namespace RevitFamilyBuilder.Services
                             + "\" is not valid; must be Global, SupplyAir, ReturnAir, ExhaustAir, or Fitting.");
                     }
 
-                    // profile is mandatory; only Round supported in this PR.
+                    // profile is mandatory; supported values: Round | Rectangular.
+                    // Each profile has its own exclusive sizing-parameter contract:
+                    //   Round        → diameter_parameter required,
+                    //                  width/height_parameter forbidden.
+                    //   Rectangular  → width_parameter AND height_parameter required,
+                    //                  diameter_parameter forbidden.
+                    bool isRound       = false;
+                    bool isRectangular = false;
+
                     if (string.IsNullOrWhiteSpace(c.Profile))
                     {
                         errors.Add(label + ": profile is required.");
                     }
-                    else if (!string.Equals(c.Profile.Trim(), "Round",
-                                 StringComparison.OrdinalIgnoreCase))
+                    else
                     {
-                        errors.Add(label + ": profile \"" + c.Profile
-                            + "\" is not supported in this PR; use \"Round\".");
+                        string p = c.Profile.Trim();
+                        isRound       = string.Equals(p, "Round",       StringComparison.OrdinalIgnoreCase);
+                        isRectangular = string.Equals(p, "Rectangular", StringComparison.OrdinalIgnoreCase);
+
+                        if (!isRound && !isRectangular)
+                        {
+                            errors.Add(label + ": profile \"" + c.Profile
+                                + "\" is not supported; use \"Round\" or \"Rectangular\".");
+                        }
                     }
 
-                    // For Round connectors the diameter parameter is mandatory
-                    // and must match an existing family parameter.
-                    bool isRound = !string.IsNullOrWhiteSpace(c.Profile)
-                        && string.Equals(c.Profile.Trim(), "Round",
-                            StringComparison.OrdinalIgnoreCase);
                     if (isRound)
                     {
+                        // diameter_parameter is mandatory and must exist.
                         if (string.IsNullOrWhiteSpace(c.DiameterParameter))
                         {
                             errors.Add(label
@@ -372,6 +382,53 @@ namespace RevitFamilyBuilder.Services
                             errors.Add(label + ": diameter_parameter \""
                                 + c.DiameterParameter
                                 + "\" does not match any declared parameter.");
+                        }
+
+                        // width_parameter / height_parameter must be absent.
+                        if (!string.IsNullOrWhiteSpace(c.WidthParameter))
+                        {
+                            errors.Add(label
+                                + ": width_parameter must not be set when profile is Round.");
+                        }
+                        if (!string.IsNullOrWhiteSpace(c.HeightParameter))
+                        {
+                            errors.Add(label
+                                + ": height_parameter must not be set when profile is Round.");
+                        }
+                    }
+                    else if (isRectangular)
+                    {
+                        // width_parameter is mandatory and must exist.
+                        if (string.IsNullOrWhiteSpace(c.WidthParameter))
+                        {
+                            errors.Add(label
+                                + ": width_parameter is required when profile is Rectangular.");
+                        }
+                        else if (!parameterNames.Contains(c.WidthParameter.Trim()))
+                        {
+                            errors.Add(label + ": width_parameter \""
+                                + c.WidthParameter
+                                + "\" does not match any declared parameter.");
+                        }
+
+                        // height_parameter is mandatory and must exist.
+                        if (string.IsNullOrWhiteSpace(c.HeightParameter))
+                        {
+                            errors.Add(label
+                                + ": height_parameter is required when profile is Rectangular.");
+                        }
+                        else if (!parameterNames.Contains(c.HeightParameter.Trim()))
+                        {
+                            errors.Add(label + ": height_parameter \""
+                                + c.HeightParameter
+                                + "\" does not match any declared parameter.");
+                        }
+
+                        // diameter_parameter must be absent.
+                        if (!string.IsNullOrWhiteSpace(c.DiameterParameter))
+                        {
+                            errors.Add(label
+                                + ": diameter_parameter must not be set when profile is Rectangular.");
                         }
                     }
                 }
