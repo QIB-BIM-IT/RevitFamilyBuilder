@@ -127,7 +127,13 @@ namespace RevitFamilyBuilder.Services
                     new GeometryDefinition
                     {
                         Id              = "body_primary",
+                        // Both fields point at the same value: the convention
+                        // wins at build time, so subcategory is kept here only
+                        // for backward-compat with consumers still reading the
+                        // raw JSON. The visual output is unchanged because
+                        // ConventionLibrary["Body"].SubcategoryName == "Body".
                         Subcategory     = "Body",
+                        Convention      = "Body",
                         Type            = GeometryType.Extrusion,
                         Profile         = "rectangular",
                         WidthParameter  = "Width",

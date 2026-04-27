@@ -22,8 +22,24 @@ namespace RevitFamilyBuilder.Schema
         /// extrusion. If several geometry entries reference the same
         /// subcategory, the engine creates it once and reuses it for the
         /// others. Omit to keep the default subcategory of the family.
+        ///
+        /// <para>When a <see cref="Convention"/> is also declared, the
+        /// convention's <c>SubcategoryName</c> WINS and this field is
+        /// ignored — keep them aligned in the JSON to avoid confusion.</para>
         /// </summary>
         public string Subcategory { get; set; }
+
+        /// <summary>
+        /// Optional company-standard preset name resolved through
+        /// <c>RevitFamilyBuilder.Config.ConventionLibrary</c>. When set, the
+        /// convention drives the subcategory and (in future PRs) line
+        /// colour, line pattern, projection weight and default material.
+        ///
+        /// <para>Omit to keep the legacy behaviour where <see cref="Subcategory"/>
+        /// is applied directly. Unknown names are rejected by the JSON
+        /// validator with the list of available conventions.</para>
+        /// </summary>
+        public string Convention { get; set; }
 
         public GeometryType Type { get; set; }
         public string Profile { get; set; }

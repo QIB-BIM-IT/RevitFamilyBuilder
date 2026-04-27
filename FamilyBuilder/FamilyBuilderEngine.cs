@@ -9,29 +9,86 @@ using System.Text.RegularExpressions;
 using Autodesk.Revit.DB;
 using Autodesk.Revit.DB.Mechanical;
 using Autodesk.Revit.UI;
+using RevitFamilyBuilder.Config;
 using RevitFamilyBuilder.Schema;
 
 namespace RevitFamilyBuilder.FamilyBuilder
 {
     public class FamilyBuilderEngine
     {
+        // Thin overload kept for back-compat with any caller that does not
+        // need the template-source diagnostic. The coordinator uses the
+        // descriptor-returning overload below.
         public Document CreateFamilyDocument(FamilyDefinition definition, UIApplication uiApp)
         {
-            string templateRoot = uiApp.Application.FamilyTemplatePath;
+            string ignoredLabel;
+            return CreateFamilyDocument(definition, uiApp, null, out ignoredLabel);
+        }
 
+        /// <summary>
+        /// Creates the family document, preferring the company template stored
+        /// on ACC over the stock Revit template.
+        ///
+        /// <para>Resolution order:
+        /// <list type="number">
+        ///   <item><description><see cref="CompanyPaths.GetCompanyTemplatePath"/>
+        ///         — used when the file exists on disk;</description></item>
+        ///   <item><description>otherwise <see cref="FamilyTemplateResolver.Resolve(string, string)"/>
+        ///         against <c>uiApp.Application.FamilyTemplatePath</c>, with a
+        ///         non-blocking warning explaining the fallback.</description></item>
+        /// </list></para>
+        ///
+        /// <para><paramref name="templateLabel"/> is a human-readable string
+        /// suitable for the build report (e.g. <c>"Metric Generic Model (entreprise)"</c>
+        /// or <c>"GenericModelMetric (stock - fallback)"</c>).</para>
+        /// </summary>
+        public Document CreateFamilyDocument(
+            FamilyDefinition definition,
+            UIApplication uiApp,
+            IList<string> warnings,
+            out string templateLabel)
+        {
+            // 1) Try the company template first (deterministic path on ACC).
+            string companyTemplatePath = CompanyPaths.GetCompanyTemplatePath();
+            if (File.Exists(companyTemplatePath))
+            {
+                Document companyDoc = uiApp.Application.NewFamilyDocument(companyTemplatePath);
+                if (companyDoc == null)
+                    throw new InvalidOperationException(
+                        "Revit returned a null document for company template: \""
+                        + companyTemplatePath + "\".");
+
+                templateLabel = Path.GetFileNameWithoutExtension(companyTemplatePath)
+                    + " (entreprise)";
+                return companyDoc;
+            }
+
+            // 2) Fall back to the stock template; warn explicitly so the
+            //    operator knows the company asset is missing on this machine.
+            if (warnings != null)
+            {
+                warnings.Add(
+                    "Template d'entreprise introuvable au chemin "
+                    + companyTemplatePath
+                    + ". Utilisation du template stock GenericModelMetric en fallback.");
+            }
+
+            string templateRoot = uiApp.Application.FamilyTemplatePath;
             if (string.IsNullOrWhiteSpace(templateRoot) || !Directory.Exists(templateRoot))
                 throw new InvalidOperationException(
                     "Revit family template path is not configured or does not exist: \""
                     + templateRoot + "\".");
 
-            string templatePath = FamilyTemplateResolver.Resolve(definition.FamilyTemplate, templateRoot);
+            string stockPath = FamilyTemplateResolver.Resolve(
+                definition.FamilyTemplate, templateRoot);
 
-            Document familyDoc = uiApp.Application.NewFamilyDocument(templatePath);
-
+            Document familyDoc = uiApp.Application.NewFamilyDocument(stockPath);
             if (familyDoc == null)
                 throw new InvalidOperationException(
-                    "Revit returned a null document for template: \"" + templatePath + "\".");
+                    "Revit returned a null document for template: \"" + stockPath + "\".");
 
+            templateLabel = (definition.FamilyTemplate ?? "GenericModelMetric")
+                + " (stock - fallback)";
             return familyDoc;
         }
 
@@ -1000,8 +1057,56 @@ namespace RevitFamilyBuilder.FamilyBuilder
                 if (id.Length > 0 && !_geometryIdMap.ContainsKey(id))
                     _geometryIdMap[id] = ext.Id;
 
-                string subcatApplied = null;
+                // Resolve the company convention first (if any). The
+                // convention's SubcategoryName intentionally overrides the
+                // legacy "subcategory" field — they should normally be aligned
+                // in the JSON, so a divergence is worth a warning.
                 string subcatRequested = (geoDef.Subcategory ?? string.Empty).Trim();
+                string conventionName = (geoDef.Convention ?? string.Empty).Trim();
+                GeometryConvention convention = null;
+                if (conventionName.Length > 0)
+                {
+                    try
+                    {
+                        convention = ConventionLibrary.Get(conventionName);
+                    }
+                    catch (ArgumentException ex)
+                    {
+                        // Defensive: validation already rejects unknown names.
+                        warnings.Add("Geometry \"" + (geoDef.Id ?? "<no-id>")
+                            + "\": " + ex.Message);
+                    }
+
+                    if (convention != null)
+                    {
+                        string conventionSubcat =
+                            (convention.SubcategoryName ?? string.Empty).Trim();
+
+                        if (conventionSubcat.Length > 0
+                            && subcatRequested.Length > 0
+                            && !string.Equals(conventionSubcat, subcatRequested,
+                                StringComparison.OrdinalIgnoreCase))
+                        {
+                            warnings.Add("Geometry \"" + (geoDef.Id ?? "<no-id>")
+                                + "\": convention \"" + convention.Name
+                                + "\" overrides subcategory \"" + subcatRequested
+                                + "\" with \"" + conventionSubcat + "\".");
+                        }
+
+                        // Convention wins.
+                        if (conventionSubcat.Length > 0)
+                            subcatRequested = conventionSubcat;
+
+                        // Other convention slots (LineColorRgb, LineProjection,
+                        // LinePatternName, DefaultMaterialName) are all null in
+                        // this PR's library, so there is nothing else to apply.
+                        // When a future PR sets non-null values, this is the
+                        // place to wire them up to the corresponding Revit
+                        // calls (Category line graphics, material assignment).
+                    }
+                }
+
+                string subcatApplied = null;
                 if (subcatRequested.Length > 0)
                 {
                     Category subCat;

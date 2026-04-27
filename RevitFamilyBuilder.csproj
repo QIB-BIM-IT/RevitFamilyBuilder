@@ -59,6 +59,9 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="Config\AppConfig.cs" />
+    <Compile Include="Config\CompanyPaths.cs" />
+    <Compile Include="Config\ConventionLibrary.cs" />
+    <Compile Include="Config\GeometryConvention.cs" />
     <Compile Include="FamilyBuilder\FamilyBuilderEngine.cs" />
     <Compile Include="FamilyBuilder\FamilyTemplateResolver.cs" />
     <Compile Include="MainWindow.xaml.cs">
