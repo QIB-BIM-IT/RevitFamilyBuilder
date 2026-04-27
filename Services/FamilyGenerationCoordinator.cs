@@ -4,6 +4,7 @@ using System.IO;
 using System.Text;
 using Autodesk.Revit.DB;
 using Autodesk.Revit.UI;
+using RevitFamilyBuilder.Config;
 using RevitFamilyBuilder.FamilyBuilder;
 using RevitFamilyBuilder.Schema;
 
@@ -27,7 +28,26 @@ namespace RevitFamilyBuilder.Services
             bool hasLookup = string.Equals(
                 definition.BuildStrategy, "lookup_table", StringComparison.OrdinalIgnoreCase);
 
-            Document familyDoc    = _engine.CreateFamilyDocument(definition, uiApp);
+            // ── Company-standards probe ─────────────────────────────────
+            // Resolve the ACC root and the company asset paths up front so
+            // the build report's "Standards d'entreprise" section reflects
+            // exactly the paths that were actually used. The shared-parameters
+            // file is only checked for existence in this PR — it is not
+            // loaded yet (future PR concern).
+            string accRoot              = CompanyPaths.GetAccRoot();
+            string sharedParametersPath = CompanyPaths.GetSharedParametersPath();
+            bool   sharedParametersFound = File.Exists(sharedParametersPath);
+            if (!sharedParametersFound)
+            {
+                warnings.Add(
+                    "SharedParameters introuvable à " + sharedParametersPath
+                    + " (sera nécessaire pour les futures fonctionnalités "
+                    + "de paramètres partagés).");
+            }
+
+            string templateLabel;
+            Document familyDoc    = _engine.CreateFamilyDocument(
+                definition, uiApp, warnings, out templateLabel);
             string categoryStatus = _engine.ApplyCategory(familyDoc, definition);
             int paramCount        = _engine.AddParameters(familyDoc, definition);
 
@@ -101,9 +121,28 @@ namespace RevitFamilyBuilder.Services
             string savedPath = _engine.SaveAndActivateDocument(familyDoc, definition, uiApp);
 
             var msg = new StringBuilder();
-            msg.Append("Family saved successfully.");
+
+            // ── Standards d'entreprise (header) ─────────────────────────
+            // Stays at the top of the report so operators immediately see
+            // which company assets were used (or missing). Layout matches
+            // the spec verbatim.
+            string sharedParamsLine = sharedParametersFound
+                ? "trouvé à " + sharedParametersPath
+                : "introuvable à " + sharedParametersPath + " - warning";
+
+            string conventionsList = string.Join(", ",
+                new List<string>(ConventionLibrary.AvailableNames()).ToArray());
+
+            msg.Append("--- Standards d'entreprise -----------------------");
+            msg.Append("\nACC root:                " + accRoot);
+            msg.Append("\nTemplate:                " + templateLabel);
+            msg.Append("\nSharedParameters:        " + sharedParamsLine);
+            msg.Append("\nConventions disponibles: " + conventionsList);
+            msg.Append("\n--------------------------------------------------");
+
+            msg.Append("\n\nFamily saved successfully.");
             msg.Append("\nFamily:           " + definition.FamilyName);
-            msg.Append("\nTemplate:         " + definition.FamilyTemplate);
+            msg.Append("\nTemplate:         " + templateLabel);
             msg.Append("\nTypes:            " + typesCreated);
             msg.Append("\nCategory:         " + categoryStatus);
             msg.Append("\nParameters:       " + paramCount);

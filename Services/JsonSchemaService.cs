@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Converters;
 using Newtonsoft.Json.Serialization;
+using RevitFamilyBuilder.Config;
 using RevitFamilyBuilder.Schema;
 
 namespace RevitFamilyBuilder.Services
@@ -146,6 +147,20 @@ namespace RevitFamilyBuilder.Services
 
                     if (string.IsNullOrWhiteSpace(geo.Profile))
                         errors.Add(label + ": profile must not be empty.");
+
+                    // "convention" is optional. When present it must match a
+                    // preset declared in ConventionLibrary; the engine then
+                    // overrides "subcategory" with the convention's value
+                    // (intentional — see GeometryDefinition.Convention).
+                    if (!string.IsNullOrWhiteSpace(geo.Convention)
+                        && !ConventionLibrary.Conventions.ContainsKey(geo.Convention.Trim()))
+                    {
+                        errors.Add(label + ": convention \"" + geo.Convention
+                            + "\" is unknown. Available conventions: "
+                            + string.Join(", ", new List<string>(
+                                ConventionLibrary.Conventions.Keys).ToArray())
+                            + ".");
+                    }
 
                     if (!parameterNames.Contains(geo.WidthParameter))
                         errors.Add(label + ": references unknown width parameter: \""
