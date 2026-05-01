@@ -58,15 +58,23 @@ namespace RevitFamilyBuilder.Services
                 // ── Reference planes ────────────────────────────────────────────
                 // Two plane families:
                 //   (a) Canonical Left/Right/Front/Back/Base/Top + Mid_LR /
-                //       Center_FB symmetry planes — drive the collar.
-                //   (b) Flange planes (FlangeLeft/Right/Front/Back) plus two
-                //       elevation planes (FlangeBot/FlangeTop) that sandwich a
-                //       flat slab at mid-collar.
+                //       Center_FB symmetry planes — drive the collar AND act as
+                //       shared middle-planes for the flange's LR / FB EQ
+                //       symmetry constraints.
+                //   (b) Flange planes (FlangeLeft/Right/Front/Back) plus three
+                //       elevation planes:
+                //         FlangeBot  / FlangeTop — sandwich a flat slab at
+                //                                  mid-collar.
+                //         FlangeMidZ            — midpoint plane between
+                //                                  FlangeBot and FlangeTop;
+                //                                  middle reference of the
+                //                                  flange-thickness EQ.
                 //
-                // FlangeBot / FlangeTop offsets are computed once from default
-                // values:
-                //   FlangeBot = CollarLength/2 − FlangeThickness/2 = 137.5
-                //   FlangeTop = CollarLength/2 + FlangeThickness/2 = 162.5
+                // FlangeBot / FlangeTop / FlangeMidZ offsets are computed once
+                // from default values:
+                //   FlangeBot  = CollarLength/2 − FlangeThickness/2 = 137.5
+                //   FlangeTop  = CollarLength/2 + FlangeThickness/2 = 162.5
+                //   FlangeMidZ = CollarLength/2                     = 150.0
                 // They are NOT driven by CollarLength — flexing CollarLength
                 // does not auto-recenter the flange. See warnings.
                 ReferencePlanes = new List<ReferencePlaneDefinition>
@@ -91,18 +99,32 @@ namespace RevitFamilyBuilder.Services
                     new ReferencePlaneDefinition { Name = "FlangeFront", Orientation = "horizontal", Offset = -222.0 },
                     new ReferencePlaneDefinition { Name = "FlangeBack",  Orientation = "horizontal", Offset =  222.0 },
 
-                    // Flange elevation planes — flat slab at mid-collar.
-                    new ReferencePlaneDefinition { Name = "FlangeBot", Orientation = "elevation", Offset = 137.5 },
-                    new ReferencePlaneDefinition { Name = "FlangeTop", Orientation = "elevation", Offset = 162.5 }
+                    // Flange elevation planes — flat slab at mid-collar plus
+                    // the midpoint plane used by the thickness EQ constraint.
+                    new ReferencePlaneDefinition { Name = "FlangeBot",  Orientation = "elevation", Offset = 137.5 },
+                    new ReferencePlaneDefinition { Name = "FlangeTop",  Orientation = "elevation", Offset = 162.5 },
+                    new ReferencePlaneDefinition { Name = "FlangeMidZ", Orientation = "elevation", Offset = 150.0 }
                 },
 
                 // ── Dimensions ──────────────────────────────────────────────────
                 // Collar: 3 labelled dimensions (Width, Depth, CollarLength) +
                 //         2 EQ dimensions for LR / FB symmetry.
                 // Flange: 3 labelled dimensions (FlangeWidth, FlangeDepth,
-                //         FlangeThickness). No EQ on the flange — the collar's
-                //         Mid_LR / Center_FB already lock the family centre and
-                //         the flange sits inside that centred frame.
+                //         FlangeThickness) + 3 EQ dimensions for LR / FB / Z
+                //         symmetry of the flange.
+                //
+                // 5 EQ dimensions in total. Mid_LR and Center_FB are SHARED
+                // middle-planes between collar and flange (one plane
+                // participates in two independent EQ constraints — Revit
+                // accepts this as long as the geometry stays consistent,
+                // which it does at default values). FlangeMidZ is dedicated
+                // to the flange's Z symmetry and is not used by the collar.
+                //
+                // Note: an earlier version of this sample omitted the flange
+                // EQ on the assumption that the collar's Mid_LR / Center_FB
+                // would propagate. Manual testing showed that EQ constraints
+                // do NOT propagate across geometries; each extrusion needs
+                // its own EQ dimensions to flex symmetrically.
                 Dimensions = new List<DimensionDefinition>
                 {
                     // Collar.
@@ -113,10 +135,17 @@ namespace RevitFamilyBuilder.Services
                     new DimensionDefinition { ReferencePlane1 = "Left",  ReferencePlaneMiddle = "Mid_LR",    ReferencePlane2 = "Right", IsEqual = true },
                     new DimensionDefinition { ReferencePlane1 = "Front", ReferencePlaneMiddle = "Center_FB", ReferencePlane2 = "Back",  IsEqual = true },
 
-                    // Flange.
+                    // Flange — labelled.
                     new DimensionDefinition { ReferencePlane1 = "FlangeLeft",  ReferencePlane2 = "FlangeRight", ParameterName = "FlangeWidth"     },
                     new DimensionDefinition { ReferencePlane1 = "FlangeFront", ReferencePlane2 = "FlangeBack",  ParameterName = "FlangeDepth"     },
-                    new DimensionDefinition { ReferencePlane1 = "FlangeBot",  ReferencePlane2 = "FlangeTop",   ParameterName = "FlangeThickness" }
+                    new DimensionDefinition { ReferencePlane1 = "FlangeBot",   ReferencePlane2 = "FlangeTop",   ParameterName = "FlangeThickness" },
+
+                    // Flange — EQ symmetry. Mid_LR / Center_FB are shared with
+                    // the collar's EQ above; FlangeMidZ is dedicated to the
+                    // flange thickness.
+                    new DimensionDefinition { ReferencePlane1 = "FlangeLeft",  ReferencePlaneMiddle = "Mid_LR",     ReferencePlane2 = "FlangeRight", IsEqual = true },
+                    new DimensionDefinition { ReferencePlane1 = "FlangeFront", ReferencePlaneMiddle = "Center_FB",  ReferencePlane2 = "FlangeBack",  IsEqual = true },
+                    new DimensionDefinition { ReferencePlane1 = "FlangeBot",   ReferencePlaneMiddle = "FlangeMidZ", ReferencePlane2 = "FlangeTop",   IsEqual = true }
                 },
 
                 // ── Symbolic lines ──────────────────────────────────────────────
@@ -202,7 +231,9 @@ namespace RevitFamilyBuilder.Services
                     "Two extrusions: collar_main (uses canonical Left/Right/Front/Back planes) and flange_mid (uses FlangeLeft/FlangeRight/FlangeFront/FlangeBack overrides).",
                     "Collar and flange intersect geometrically at the flange position; this exercises the engine's coincident-geometry handling without being a blocker.",
                     "Flange Z position is statically offset, not driven by CollarLength. If CollarLength flexes, the flange does not auto-recenter. Acceptable limitation for this PR.",
-                    "Connectors, voids, types, formulas intentionally omitted from this sample to isolate the multi-geometry pipeline test."
+                    "Connectors, voids, types, formulas intentionally omitted from this sample to isolate the multi-geometry pipeline test.",
+                    "Flange symmetry constraints applied: FlangeWidth/FlangeDepth flex symmetrically around Mid_LR/Center_FB; FlangeThickness flexes symmetrically around FlangeMidZ.",
+                    "FlangeMidZ is a static plane at offset 150mm (= CollarLength_default / 2). It does NOT follow CollarLength when CollarLength flexes — same limitation as before."
                 }
             };
         }
