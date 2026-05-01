@@ -240,6 +240,8 @@ namespace RevitFamilyBuilder
             string warnings,
             string buildSummary,
             string generationScope,
+            string geometryCount,
+            string geometryBreakdown,
             string typeCount,
             string familyLogic)
         {
@@ -257,6 +259,8 @@ namespace RevitFamilyBuilder
 
             AiReviewGenerationScopeText.Text = string.IsNullOrWhiteSpace(generationScope)
                 ? "—" : FormatGenerationScope(generationScope);
+            AiReviewGeometryCountText.Text     = string.IsNullOrWhiteSpace(geometryCount)     ? "—" : geometryCount;
+            AiReviewGeometryBreakdownText.Text = string.IsNullOrWhiteSpace(geometryBreakdown) ? "—" : geometryBreakdown;
             AiReviewTypeCountText.Text = string.IsNullOrWhiteSpace(typeCount) ? "—" : typeCount;
             // TypeSelectionPanel is populated separately by PopulateTypeSelection().
             AiReviewFamilyLogicText.Text = string.IsNullOrWhiteSpace(familyLogic) ? "—" : familyLogic;
@@ -574,9 +578,23 @@ namespace RevitFamilyBuilder
             int typeCountInt = review?["detected_type_count"]?.Value<int>() ?? 0;
             string typeCount = typeCountInt > 0 ? typeCountInt + " type(s)" : "—";
 
+            // geometry_count / geometry_breakdown — populated by Call 1 when the
+            // schema includes them. Fallback gracefully when absent so older
+            // review responses (or hand-crafted JSON in the preview) still display.
+            int geometryCountInt = review?["geometry_count"]?.Value<int>() ?? 1;
+            string geometryCount = geometryCountInt == 1
+                ? "1 extrusion"
+                : geometryCountInt + " extrusions";
+
+            var    geometryBreakdownArr = review?["geometry_breakdown"] as JArray;
+            string geometryBreakdown = geometryBreakdownArr != null
+                                       && geometryBreakdownArr.Count > 0
+                ? string.Join("\n", geometryBreakdownArr.Values<string>())
+                : string.Empty;
+
             FillAiReviewCard(
                 matchStatus, model, dimensions, source, confidence, warnings, summary,
-                generationScope, typeCount, familyLogic);
+                generationScope, geometryCount, geometryBreakdown, typeCount, familyLogic);
             return matchStatus;
         }
 

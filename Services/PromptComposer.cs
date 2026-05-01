@@ -60,7 +60,20 @@ namespace RevitFamilyBuilder.Services
             "  detected_formulas   : array of strings, e.g. \"Height = Width / 2\". " +
             "Empty [] when user did not state a relationship.\n" +
             "  formula_summary     : one sentence, e.g. \"Height = Width / 2 (type parameter).\" " +
-            "\"No explicit parameter relationships.\" when empty.\n\n" +
+            "\"No explicit parameter relationships.\" when empty.\n" +
+            "  geometry_count      : integer — number of distinct rectangular extrusions " +
+            "you plan to emit in the family JSON. 1 for a simple box. 2+ when the product " +
+            "has clearly separate bodies (e.g. body + wrapping flange).\n" +
+            "  geometry_breakdown  : array of strings, one per planned extrusion, " +
+            "format \"id: profile, dimensions\". " +
+            "Example for multi-geometry: " +
+            "[\"collar_main: rectangular, Width × Depth × CollarLength\", " +
+            "\"flange_mid: rectangular, FlangeWidth × FlangeDepth × FlangeThickness\"]. " +
+            "For single geometry, return one entry, e.g. " +
+            "[\"body_main: rectangular, Width × Depth × Height\"]. " +
+            "Empty [] is acceptable for very simple single-extrusion cases.\n" +
+            "  When geometry_count >= 2, mention multi-geometry explicitly in build_summary " +
+            "(e.g. \"Strategy: single_type — multi-geometry with collar + flange.\").\n\n" +
 
             "== Build strategy rules ==\n" +
             "Choose build_strategy based on the request:\n" +
@@ -108,7 +121,8 @@ namespace RevitFamilyBuilder.Services
             "- family_template: \"GenericModelMetric\"\n" +
             "- category: \"Generic Models\"\n" +
             "- parameter type: one of Length | Angle | Number | YesNo | Text | Material\n" +
-            "- reference plane orientation: \"vertical\" | \"horizontal\"\n" +
+            "- reference plane orientation: \"vertical\" | \"horizontal\" | \"elevation\" " +
+            "(\"elevation\" = Z-normal plane, required for any plane that bounds an extrusion in Z)\n" +
             "- symbolic_lines view: \"plan\"\n" +
             "- geometry type: \"Extrusion\", profile: \"rectangular\"\n" +
             "- All length values (offsets, default_value for Length parameters) are in millimeters.\n\n" +
@@ -143,7 +157,66 @@ namespace RevitFamilyBuilder.Services
             "  Left edge  : (Left, Back)   -> (Left, Front)\n\n" +
 
             "GEOMETRY: type: \"Extrusion\", profile: \"rectangular\"\n" +
+            "  id: \"body_main\" (or another unique identifier)\n" +
             "  width_parameter: \"Width\", depth_parameter: \"Depth\", height_parameter: \"Height\"\n\n" +
+
+            "== Multi-geometry (multiple rectangular extrusions) ==\n" +
+            "Use multi-geometry when a product has clearly distinct rectangular bodies " +
+            "(e.g. MEP fitting with body + wrapping flange, equipment with visually " +
+            "distinct sub-components). For a single rectangular box, keep one geometry " +
+            "entry — do NOT split it artificially.\n\n" +
+
+            "PER-ENTRY FIELDS:\n" +
+            "- id                : REQUIRED, unique across the geometry array " +
+            "(e.g. \"collar_main\", \"flange_mid\"). Internal — not visible in Revit.\n" +
+            "- type              : \"Extrusion\", profile: \"rectangular\".\n" +
+            "- width/depth/height_parameter: each extrusion can use its OWN parameters " +
+            "(e.g. collar uses Width/Depth/CollarLength while flange uses " +
+            "FlangeWidth/FlangeDepth/FlangeThickness).\n" +
+            "- subcategory / convention : optional.\n" +
+            "- left_plane / right_plane / front_plane / back_plane / base_plane / top_plane : " +
+            "OPTIONAL plane-name overrides. Omit (null) to fall back to the canonical " +
+            "Left / Right / Front / Back / Base / Top.\n\n" +
+
+            "PLAN RULES (CRITICAL):\n" +
+            "- Any plane named in a *_plane override MUST be declared in reference_planes; " +
+            "the validator rejects unknown names.\n" +
+            "- The Z-bounding planes of any secondary extrusion (flange Bot/Top, midpoint " +
+            "pin, etc.) MUST use orientation \"elevation\". With \"horizontal\" they " +
+            "would be Y-normal and the extrusion would collapse to zero thickness in Z.\n\n" +
+
+            "NAMING (recommended pattern for a wrapping flange around a central body):\n" +
+            "  FlangeLeft  / FlangeRight : \"vertical\"   (wider than the body)\n" +
+            "  FlangeFront / FlangeBack  : \"horizontal\" (wider than the body)\n" +
+            "  FlangeBot   / FlangeTop   : \"elevation\"  (flat slab at mid-height)\n" +
+            "  FlangeMidZ                : \"elevation\"  (midpoint between Bot/Top)\n\n" +
+
+            "SYMMETRY:\n" +
+            "Each extrusion needs its own EQ dimensions; EQ on the body does NOT propagate " +
+            "to secondary geometries. Add EQ entries (reference_plane_middle + is_equal=true) " +
+            "per axis (LR, FB, thickness). To make a flange follow the body centre when " +
+            "the body's length flexes, pin the flange's mid-Z plane with " +
+            "EQ Base ↔ FlangeMidZ ↔ Top.\n\n" +
+
+            "Example structure (collar + flange, abridged):\n" +
+            "  parameters       : Width, Depth, CollarLength, FlangeWidth, FlangeDepth, FlangeThickness\n" +
+            "  reference_planes : Mid_LR, Center_FB, Left/Right (vertical), Front/Back " +
+            "(horizontal), Base/Top (elevation), FlangeLeft/Right (vertical), " +
+            "FlangeFront/Back (horizontal), FlangeBot/Top/MidZ (elevation)\n" +
+            "  geometry         : [\n" +
+            "                       { id:\"collar_main\", width_parameter:\"Width\", " +
+            "depth_parameter:\"Depth\", height_parameter:\"CollarLength\" },\n" +
+            "                       { id:\"flange_mid\", width_parameter:\"FlangeWidth\", " +
+            "depth_parameter:\"FlangeDepth\", height_parameter:\"FlangeThickness\", " +
+            "left_plane:\"FlangeLeft\", right_plane:\"FlangeRight\", " +
+            "front_plane:\"FlangeFront\", back_plane:\"FlangeBack\", " +
+            "base_plane:\"FlangeBot\", top_plane:\"FlangeTop\" }\n" +
+            "                     ]\n\n" +
+
+            "Scope: this PR supports MULTI-GEOMETRY RECTANGULAR EXTRUSIONS only with " +
+            "build_strategy=\"single_type\". Cylinders, round voids, and combining " +
+            "multi-geometry with types/formulas/lookup_table are out of scope and will " +
+            "come in later PRs.\n\n" +
 
             "== Optional formulas ==\n" +
             "Only when the user EXPLICITLY implies a numeric relationship (e.g. \"Height = Width / 2\"):\n" +
