@@ -112,13 +112,21 @@ namespace RevitFamilyBuilder.Services
                 // Flange: 3 labelled dimensions (FlangeWidth, FlangeDepth,
                 //         FlangeThickness) + 3 EQ dimensions for LR / FB / Z
                 //         symmetry of the flange.
+                // Pin   : 1 EQ dimension Base ↔ FlangeMidZ ↔ Top that locks
+                //         FlangeMidZ to the midpoint of the collar height.
                 //
-                // 5 EQ dimensions in total. Mid_LR and Center_FB are SHARED
+                // 6 EQ dimensions in total. Mid_LR and Center_FB are SHARED
                 // middle-planes between collar and flange (one plane
                 // participates in two independent EQ constraints — Revit
                 // accepts this as long as the geometry stays consistent,
-                // which it does at default values). FlangeMidZ is dedicated
-                // to the flange's Z symmetry and is not used by the collar.
+                // which it does at default values). FlangeMidZ is the middle
+                // reference of two EQs: the flange-thickness EQ above AND
+                // the pin EQ below. Without the pin, FlangeMidZ would float
+                // and FlangeThickness would flex asymmetrically (only
+                // upward) — the pin forces it to track CollarLength/2 so
+                // the flange recentres automatically when CollarLength
+                // flexes. This also corrects the previously documented
+                // Z-static limitation as a beneficial side effect.
                 //
                 // Note: an earlier version of this sample omitted the flange
                 // EQ on the assumption that the collar's Mid_LR / Center_FB
@@ -145,7 +153,12 @@ namespace RevitFamilyBuilder.Services
                     // flange thickness.
                     new DimensionDefinition { ReferencePlane1 = "FlangeLeft",  ReferencePlaneMiddle = "Mid_LR",     ReferencePlane2 = "FlangeRight", IsEqual = true },
                     new DimensionDefinition { ReferencePlane1 = "FlangeFront", ReferencePlaneMiddle = "Center_FB",  ReferencePlane2 = "FlangeBack",  IsEqual = true },
-                    new DimensionDefinition { ReferencePlane1 = "FlangeBot",   ReferencePlaneMiddle = "FlangeMidZ", ReferencePlane2 = "FlangeTop",   IsEqual = true }
+                    new DimensionDefinition { ReferencePlane1 = "FlangeBot",   ReferencePlaneMiddle = "FlangeMidZ", ReferencePlane2 = "FlangeTop",   IsEqual = true },
+
+                    // Pin — locks FlangeMidZ to the midpoint of Base ↔ Top so
+                    // it tracks CollarLength/2 when CollarLength flexes; the
+                    // flange follows the centre of the collar as a result.
+                    new DimensionDefinition { ReferencePlane1 = "Base",        ReferencePlaneMiddle = "FlangeMidZ", ReferencePlane2 = "Top",         IsEqual = true }
                 },
 
                 // ── Symbolic lines ──────────────────────────────────────────────
@@ -230,10 +243,9 @@ namespace RevitFamilyBuilder.Services
                     "Multi-geometry minimal test: rectangular approximation of a fire damper Collar + Flange.",
                     "Two extrusions: collar_main (uses canonical Left/Right/Front/Back planes) and flange_mid (uses FlangeLeft/FlangeRight/FlangeFront/FlangeBack overrides).",
                     "Collar and flange intersect geometrically at the flange position; this exercises the engine's coincident-geometry handling without being a blocker.",
-                    "Flange Z position is statically offset, not driven by CollarLength. If CollarLength flexes, the flange does not auto-recenter. Acceptable limitation for this PR.",
                     "Connectors, voids, types, formulas intentionally omitted from this sample to isolate the multi-geometry pipeline test.",
                     "Flange symmetry constraints applied: FlangeWidth/FlangeDepth flex symmetrically around Mid_LR/Center_FB; FlangeThickness flexes symmetrically around FlangeMidZ.",
-                    "FlangeMidZ is a static plane at offset 150mm (= CollarLength_default / 2). It does NOT follow CollarLength when CollarLength flexes — same limitation as before."
+                    "FlangeMidZ is now pinned to the midpoint of the collar height via EQ Base↔FlangeMidZ↔Top. When CollarLength flexes, FlangeMidZ recenters automatically and the flange follows. This corrects the previously documented Z-static limitation."
                 }
             };
         }
