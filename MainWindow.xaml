@@ -213,6 +213,8 @@
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
                     </Grid.RowDefinitions>
 
                     <TextBlock Grid.Row="0" Grid.Column="0"
@@ -274,30 +276,48 @@
                                Text="—" Margin="0,8,0,5"/>
 
                     <TextBlock Grid.Row="7" Grid.Column="0"
-                               Text="Detected types:"
+                               Text="Geometry count:"
                                Foreground="#999999" Margin="0,0,0,5"/>
-                    <TextBlock x:Name="AiReviewTypeCountText"
+                    <TextBlock x:Name="AiReviewGeometryCountText"
                                Grid.Row="7" Grid.Column="1"
                                Text="—" Margin="0,0,0,5"/>
 
                     <TextBlock Grid.Row="8" Grid.Column="0"
+                               Text="Geometry breakdown:"
+                               Foreground="#999999"
+                               VerticalAlignment="Top"
+                               Margin="0,0,0,5"/>
+                    <TextBlock x:Name="AiReviewGeometryBreakdownText"
+                               Grid.Row="8" Grid.Column="1"
+                               Text="—"
+                               TextWrapping="Wrap"
+                               Margin="0,0,0,5"/>
+
+                    <TextBlock Grid.Row="9" Grid.Column="0"
+                               Text="Detected types:"
+                               Foreground="#999999" Margin="0,0,0,5"/>
+                    <TextBlock x:Name="AiReviewTypeCountText"
+                               Grid.Row="9" Grid.Column="1"
+                               Text="—" Margin="0,0,0,5"/>
+
+                    <TextBlock Grid.Row="10" Grid.Column="0"
                                Text="Type details:"
                                Foreground="#999999"
                                VerticalAlignment="Top"
                                Margin="0,0,0,5"/>
                     <!-- Populated dynamically: TextBlock for 0/1 type, CheckBoxes for 2+ types -->
                     <StackPanel x:Name="TypeSelectionPanel"
-                                Grid.Row="8" Grid.Column="1"
+                                Grid.Row="10" Grid.Column="1"
                                 VerticalAlignment="Top"
                                 Margin="0,0,0,5"/>
 
-                    <TextBlock Grid.Row="9" Grid.Column="0"
+                    <TextBlock Grid.Row="11" Grid.Column="0"
                                Text="Family logic:"
                                Foreground="#999999"
                                VerticalAlignment="Top"
                                Margin="0,0,0,0"/>
                     <TextBlock x:Name="AiReviewFamilyLogicText"
-                               Grid.Row="9" Grid.Column="1"
+                               Grid.Row="11" Grid.Column="1"
                                Text="—"
                                TextWrapping="Wrap"
                                Margin="0,0,0,0"

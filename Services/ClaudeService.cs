@@ -65,7 +65,7 @@ namespace RevitFamilyBuilder.Services
         ""required"": [""name"",""orientation"",""offset""],
         ""properties"": {
           ""name"":        { ""type"": ""string"" },
-          ""orientation"": { ""type"": ""string"", ""enum"": [""vertical"",""horizontal""] },
+          ""orientation"": { ""type"": ""string"", ""enum"": [""vertical"",""horizontal"",""elevation""] },
           ""offset"":      { ""type"": ""number"" }
         }
       }
@@ -103,13 +103,22 @@ namespace RevitFamilyBuilder.Services
       ""items"": {
         ""type"": ""object"",
         ""additionalProperties"": false,
-        ""required"": [""type"",""profile""],
+        ""required"": [""id"",""type"",""profile""],
         ""properties"": {
+          ""id"":               { ""type"": ""string"" },
           ""type"":             { ""type"": ""string"", ""enum"": [""Extrusion""]    },
           ""profile"":          { ""type"": ""string"", ""enum"": [""rectangular""] },
           ""width_parameter"":  { ""type"": ""string"" },
           ""depth_parameter"":  { ""type"": ""string"" },
-          ""height_parameter"": { ""type"": ""string"" }
+          ""height_parameter"": { ""type"": ""string"" },
+          ""subcategory"":      { ""type"": ""string"" },
+          ""convention"":       { ""type"": ""string"" },
+          ""left_plane"":       { ""type"": ""string"" },
+          ""right_plane"":      { ""type"": ""string"" },
+          ""front_plane"":      { ""type"": ""string"" },
+          ""back_plane"":       { ""type"": ""string"" },
+          ""base_plane"":       { ""type"": ""string"" },
+          ""top_plane"":        { ""type"": ""string"" }
         }
       }
     },
@@ -357,7 +366,8 @@ namespace RevitFamilyBuilder.Services
                     "selected_model", "detected_dimensions", "source",
                     "confidence", "warnings", "build_summary",
                     "detected_type_count", "detected_types",
-                    "selected_family_logic", "detected_formulas", "formula_summary"),
+                    "selected_family_logic", "detected_formulas", "formula_summary",
+                    "geometry_count", "geometry_breakdown"),
                 ["properties"]           = new JObject
                 {
                     ["match_status"] = new JObject
@@ -406,7 +416,13 @@ namespace RevitFamilyBuilder.Services
                         ["type"]  = "array",
                         ["items"] = new JObject { ["type"] = "string" }
                     },
-                    ["formula_summary"] = new JObject { ["type"] = "string" }
+                    ["formula_summary"] = new JObject { ["type"] = "string" },
+                    ["geometry_count"]  = new JObject { ["type"] = "integer" },
+                    ["geometry_breakdown"] = new JObject
+                    {
+                        ["type"]  = "array",
+                        ["items"] = new JObject { ["type"] = "string" }
+                    }
                 }
             };
         }
