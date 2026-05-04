@@ -349,12 +349,24 @@ namespace RevitFamilyBuilder
 
             string reviewJson = JsonConvert.SerializeObject(_pendingReview, Formatting.Indented);
 
+            // Build the family context from the review JObject so Call 2's
+            // schema stays minimal for single-geometry prompts (avoids the
+            // Anthropic 503 grammar_compilation overload). Defensive defaults
+            // keep this safe if the review is missing these fields for any
+            // reason.
+            var familyContext = new FamilyContext
+            {
+                GeometryCount = _pendingReview?["geometry_count"]?.Value<int>() ?? 1,
+                BuildStrategy = _pendingReview?["build_strategy"]?.Value<string>()
+                                ?? "single_type"
+            };
+
             // First attempt.
             string firstJson;
             try
             {
                 firstJson = await ClaudeService.GetProposedJsonAsync(
-                    _pendingPrompt, reviewJson, selectedTypes,
+                    _pendingPrompt, reviewJson, selectedTypes, familyContext,
                     _pendingImageBase64, _pendingImageMediaType, _pendingPdfBase64);
             }
             catch (Exception ex)
@@ -383,7 +395,10 @@ namespace RevitFamilyBuilder
             string repairedJson;
             try
             {
-                repairedJson = await ClaudeService.RepairProposedJsonAsync(firstJson, firstErrors);
+                // Repair MUST use the same context so Anthropic compiles the
+                // identical schema and Claude is asked to fix the same JSON shape.
+                repairedJson = await ClaudeService.RepairProposedJsonAsync(
+                    firstJson, firstErrors, familyContext);
             }
             catch (Exception ex)
             {
