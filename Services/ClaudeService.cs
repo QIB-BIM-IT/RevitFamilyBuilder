@@ -10,12 +10,32 @@ using RevitFamilyBuilder.Config;
 namespace RevitFamilyBuilder.Services
 {
     /// <summary>
+    /// Lightweight context object derived from the Call 1 review JSON and used
+    /// to parameterise the Call 2 family schema. The minimal set today is the
+    /// number of geometries and the build strategy; both come straight from
+    /// review fields. Future PRs will extend this with requires_voids /
+    /// requires_formulas / requires_connectors flags so the schema can also
+    /// drop those sections when the user's prompt does not need them.
+    /// </summary>
+    public class FamilyContext
+    {
+        /// <summary>Number of distinct extrusions Claude announced in the review (review.geometry_count).</summary>
+        public int GeometryCount { get; set; }
+
+        /// <summary>Build strategy from the review (single_type / explicit_types / lookup_table).</summary>
+        public string BuildStrategy { get; set; }
+    }
+
+    /// <summary>
     /// Two-call Claude workflow:
     ///   Call 1 (Generate JSON button) — review-only schema, lightweight.
     ///   Call 2 (Confirm and Generate) — family-JSON-only schema, no review wrapper.
     ///
     /// Grammar-size discipline: each schema is self-contained and well under
     /// Anthropic's compiled-grammar limit. No combined wrapper is ever built.
+    /// The Call 2 schema is also CONTEXT-AWARE: it only includes the geometry
+    /// override fields when the review announces 2+ extrusions, keeping the
+    /// compiled grammar small for the common single-geometry case.
     ///
     /// Content-block construction uses JArray/JObject exclusively (not C# anonymous
     /// types) so that serialization is deterministic regardless of which Newtonsoft.Json
@@ -110,15 +130,7 @@ namespace RevitFamilyBuilder.Services
           ""profile"":          { ""type"": ""string"", ""enum"": [""rectangular""] },
           ""width_parameter"":  { ""type"": ""string"" },
           ""depth_parameter"":  { ""type"": ""string"" },
-          ""height_parameter"": { ""type"": ""string"" },
-          ""subcategory"":      { ""type"": ""string"" },
-          ""convention"":       { ""type"": ""string"" },
-          ""left_plane"":       { ""type"": ""string"" },
-          ""right_plane"":      { ""type"": ""string"" },
-          ""front_plane"":      { ""type"": ""string"" },
-          ""back_plane"":       { ""type"": ""string"" },
-          ""base_plane"":       { ""type"": ""string"" },
-          ""top_plane"":        { ""type"": ""string"" }
+          ""height_parameter"": { ""type"": ""string"" }
         }
       }
     },
@@ -244,6 +256,7 @@ namespace RevitFamilyBuilder.Services
             string userPrompt,
             string reviewJson,
             IList<string> selectedTypes,
+            FamilyContext context,
             string imageBase64    = null,
             string imageMediaType = null,
             string pdfBase64      = null)
@@ -251,14 +264,17 @@ namespace RevitFamilyBuilder.Services
                 BuildUserContent(
                     PromptComposer.BuildFamilyMessage(userPrompt, reviewJson, selectedTypes),
                     imageBase64, imageMediaType, pdfBase64),
-                BuildFamilySchema(),
+                BuildFamilySchema(context),
                 PromptComposer.FamilySystemPrompt);
 
+        // The repair call MUST use the same context as the original failed
+        // request so the schema shape is identical. The caller is expected to
+        // hold on to the context across the Get → Repair retry.
         public static Task<string> RepairProposedJsonAsync(
-            string invalidJson, IList<string> validationErrors)
+            string invalidJson, IList<string> validationErrors, FamilyContext context)
             => CallApiAsync(
                 BuildUserContent(PromptComposer.BuildRepairMessage(invalidJson, validationErrors)),
-                BuildFamilySchema(),
+                BuildFamilySchema(context),
                 PromptComposer.FamilySystemPrompt);
 
         // ── Shared HTTP plumbing ─────────────────────────────────────────────
@@ -427,54 +443,35 @@ namespace RevitFamilyBuilder.Services
             };
         }
 
-        private static JObject BuildFamilySchema()
+        // Builds the Call 2 family-JSON schema, parameterised by the review
+        // context so the compiled grammar stays small.
+        //
+        // ALWAYS included (essentials): schema_version, family_name,
+        // family_template, category, parameters, reference_planes, dimensions,
+        // symbolic_lines, geometry, warnings, build_strategy.
+        //
+        // CONDITIONALLY included on geometry items: the 8 multi-geometry
+        // override fields (subcategory, convention, left_plane, right_plane,
+        // front_plane, back_plane, base_plane, top_plane) — only when the
+        // review announces 2+ extrusions. Single-geometry families don't need
+        // them and including them was enough to push the compiled grammar
+        // over Anthropic's overload threshold (503 grammar_compilation
+        // overloaded_error).
+        //
+        // INTENTIONALLY EXCLUDED in this PR: formulas, types, voids. The
+        // follow-up "gros cohérent" PR will gate them on review-level flags
+        // (requires_formulas / requires_voids / requires_connectors). For
+        // now, AI-generated families cannot include those sections; the
+        // server-side sample (SampleJsonService) is unaffected because it
+        // bypasses Anthropic entirely.
+        private static JObject BuildFamilySchema(FamilyContext context)
         {
             JObject schema   = JObject.Parse(FamilySchemaJson);
             var     props    = (JObject)schema["properties"];
             var     required = (JArray)schema["required"];
 
-            props["formulas"] = new JObject
-            {
-                ["type"]  = "array",
-                ["items"] = new JObject
-                {
-                    ["type"]                 = "object",
-                    ["additionalProperties"] = false,
-                    ["required"]             = new JArray("parameter_name", "expression"),
-                    ["properties"]           = new JObject
-                    {
-                        ["parameter_name"] = new JObject { ["type"] = "string" },
-                        ["expression"]     = new JObject { ["type"] = "string" }
-                    }
-                }
-            };
-
-            props["types"] = new JObject
-            {
-                ["type"]  = "array",
-                ["items"] = new JObject
-                {
-                    ["type"]                 = "object",
-                    ["additionalProperties"] = false,
-                    ["required"]             = new JArray("name"),
-                    ["properties"]           = new JObject
-                    {
-                        ["name"] = new JObject { ["type"] = "string" },
-                        ["parameter_values"] = new JObject
-                        {
-                            ["type"]                 = "object",
-                            ["additionalProperties"] = false,
-                            ["properties"]           = new JObject
-                            {
-                                ["Width"]  = new JObject { ["type"] = "string" },
-                                ["Depth"]  = new JObject { ["type"] = "string" },
-                                ["Height"] = new JObject { ["type"] = "string" }
-                            }
-                        }
-                    }
-                }
-            };
-
+            // build_strategy is always required so the engine knows which
+            // type-management path to take.
             props["build_strategy"] = new JObject
             {
                 ["type"] = "string",
@@ -482,11 +479,21 @@ namespace RevitFamilyBuilder.Services
             };
             required.Add("build_strategy");
 
-            props["voids"] = new JObject
+            // Multi-geometry override fields — added only when needed.
+            if (context != null && context.GeometryCount >= 2)
             {
-                ["type"]  = "array",
-                ["items"] = new JObject { ["type"] = "string" }
-            };
+                var geometryItemProps =
+                    (JObject)props["geometry"]["items"]["properties"];
+
+                geometryItemProps["subcategory"] = new JObject { ["type"] = "string" };
+                geometryItemProps["convention"]  = new JObject { ["type"] = "string" };
+                geometryItemProps["left_plane"]  = new JObject { ["type"] = "string" };
+                geometryItemProps["right_plane"] = new JObject { ["type"] = "string" };
+                geometryItemProps["front_plane"] = new JObject { ["type"] = "string" };
+                geometryItemProps["back_plane"]  = new JObject { ["type"] = "string" };
+                geometryItemProps["base_plane"]  = new JObject { ["type"] = "string" };
+                geometryItemProps["top_plane"]   = new JObject { ["type"] = "string" };
+            }
 
             return schema;
         }
