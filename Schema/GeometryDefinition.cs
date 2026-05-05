@@ -1,7 +1,34 @@
 using System.Collections.Generic;
+using Newtonsoft.Json;
 
 namespace RevitFamilyBuilder.Schema
 {
+    /// <summary>
+    /// Transit container used ONLY at deserialization time to receive the
+    /// <c>plane_overrides</c> sub-object emitted by the Call 2 Anthropic
+    /// schema. The six plane names are grouped into this object (rather
+    /// than exposed as 8 independent optional fields on the geometry item)
+    /// to keep the compiled grammar small enough to compile within
+    /// Anthropic's time budget — see <c>ClaudeService.BuildFamilySchema</c>
+    /// for the full rationale.
+    ///
+    /// <para>After <c>JsonSchemaService.Parse</c> runs, the values from
+    /// this sub-object are copied to the corresponding flat properties on
+    /// <see cref="GeometryDefinition"/> (<c>LeftPlane</c>, <c>RightPlane</c>,
+    /// etc.), which remain the stable read API consumed by the validator
+    /// and the engine. This class is therefore not consulted in any code
+    /// path downstream of <c>Parse</c>.</para>
+    /// </summary>
+    public class PlaneOverrides
+    {
+        public string LeftPlane  { get; set; }
+        public string RightPlane { get; set; }
+        public string FrontPlane { get; set; }
+        public string BackPlane  { get; set; }
+        public string BasePlane  { get; set; }
+        public string TopPlane   { get; set; }
+    }
+
     public class GeometryDefinition
     {
         /// <summary>
@@ -71,6 +98,19 @@ namespace RevitFamilyBuilder.Schema
         public string BackPlane  { get; set; }
         public string BasePlane  { get; set; }
         public string TopPlane   { get; set; }
+
+        /// <summary>
+        /// Transit container populated by the Anthropic Call 2 schema when
+        /// the AI emits per-geometry plane overrides. Mapped to the flat
+        /// <c>LeftPlane</c>/<c>RightPlane</c>/etc. properties above by
+        /// <c>JsonSchemaService.Parse</c>. The validator and engine never
+        /// read this property directly — they always consume the flat
+        /// fields. Decorated with <c>NullValueHandling.Ignore</c> so the
+        /// server-side sample serializer (which never sets it) does not
+        /// emit a noisy <c>"plane_overrides": null</c> in its preview output.
+        /// </summary>
+        [JsonProperty(NullValueHandling = NullValueHandling.Ignore)]
+        public PlaneOverrides PlaneOverrides { get; set; }
 
         // Axes on which the extrusion should be symmetric around a centre plane.
         // Valid values: "LR" (Left-Right symmetry, requires a shared centre plane + EQ dim),

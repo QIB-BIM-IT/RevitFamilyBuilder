@@ -22,7 +22,45 @@ namespace RevitFamilyBuilder.Services
 
         public FamilyDefinition Parse(string json)
         {
-            return JsonConvert.DeserializeObject<FamilyDefinition>(json, _settings);
+            var definition = JsonConvert.DeserializeObject<FamilyDefinition>(json, _settings);
+            if (definition?.Geometry == null) return definition;
+
+            // Post-deserialization mapping: the Anthropic Call 2 schema groups
+            // the six per-geometry plane names into a single optional
+            // "plane_overrides" sub-object (this shape was chosen specifically
+            // to keep the compiled grammar small — see ClaudeService for the
+            // rationale). The rest of the codebase (validator + engine) reads
+            // the FLAT plane properties on GeometryDefinition, so we copy from
+            // the sub-object to the flat fields here. Hand-crafted JSON that
+            // already uses the flat fields directly continues to work because
+            // PlaneOverrides will be null in that case and we simply skip the
+            // copy.
+            //
+            // We also default Convention to "Body" when missing: the AI schema
+            // no longer exposes subcategory/convention (also for grammar size),
+            // so AI-generated geometries arrive without a convention. Defaulting
+            // here keeps the engine intact while still applying the standard
+            // "Body" subcategory uniformly. Existing JSON that already sets
+            // Convention is left untouched.
+            foreach (GeometryDefinition geo in definition.Geometry)
+            {
+                if (geo == null) continue;
+
+                if (geo.PlaneOverrides != null)
+                {
+                    geo.LeftPlane  = geo.PlaneOverrides.LeftPlane;
+                    geo.RightPlane = geo.PlaneOverrides.RightPlane;
+                    geo.FrontPlane = geo.PlaneOverrides.FrontPlane;
+                    geo.BackPlane  = geo.PlaneOverrides.BackPlane;
+                    geo.BasePlane  = geo.PlaneOverrides.BasePlane;
+                    geo.TopPlane   = geo.PlaneOverrides.TopPlane;
+                }
+
+                if (string.IsNullOrWhiteSpace(geo.Convention))
+                    geo.Convention = "Body";
+            }
+
+            return definition;
         }
 
         public ValidationResult Validate(FamilyDefinition definition)
