@@ -450,20 +450,28 @@ namespace RevitFamilyBuilder.Services
         // family_template, category, parameters, reference_planes, dimensions,
         // symbolic_lines, geometry, warnings, build_strategy.
         //
-        // CONDITIONALLY included on geometry items: the 8 multi-geometry
-        // override fields (subcategory, convention, left_plane, right_plane,
-        // front_plane, back_plane, base_plane, top_plane) — only when the
-        // review announces 2+ extrusions. Single-geometry families don't need
-        // them and including them was enough to push the compiled grammar
-        // over Anthropic's overload threshold (503 grammar_compilation
-        // overloaded_error).
+        // CONDITIONALLY included on geometry items (when GeometryCount >= 2):
+        // a SINGLE optional sub-object "plane_overrides" that, when present,
+        // requires all six plane names. This shape was chosen specifically to
+        // keep Anthropic's compiled grammar small enough to compile within
+        // the API's time budget. The earlier design (8 independent optional
+        // string fields) produced 2^8 = 256 combinations per geometry item,
+        // which timed the grammar compiler out (400 grammar_compilation
+        // timed_out / 503 grammar_compilation overloaded_error) on
+        // multi-geometry prompts. The monolithic sub-object collapses that
+        // to 2 states (present / absent) — a 128× reduction.
         //
-        // INTENTIONALLY EXCLUDED in this PR: formulas, types, voids. The
-        // follow-up "gros cohérent" PR will gate them on review-level flags
-        // (requires_formulas / requires_voids / requires_connectors). For
-        // now, AI-generated families cannot include those sections; the
-        // server-side sample (SampleJsonService) is unaffected because it
-        // bypasses Anthropic entirely.
+        // The "subcategory" and "convention" geometry fields are NOT exposed
+        // to the AI in this PR; JsonSchemaService.Parse defaults Convention
+        // to "Body" so the engine still applies a consistent subcategory.
+        // Per-geometry conventions will return in a future PR if the use
+        // case justifies the schema cost.
+        //
+        // INTENTIONALLY EXCLUDED: formulas, types, voids. The follow-up
+        // "gros cohérent" PR will gate them on review-level flags
+        // (requires_formulas / requires_voids / requires_connectors).
+        // The server-side sample (SampleJsonService) is unaffected because
+        // it bypasses Anthropic entirely.
         private static JObject BuildFamilySchema(FamilyContext context)
         {
             JObject schema   = JObject.Parse(FamilySchemaJson);
@@ -479,20 +487,32 @@ namespace RevitFamilyBuilder.Services
             };
             required.Add("build_strategy");
 
-            // Multi-geometry override fields — added only when needed.
+            // Multi-geometry override fields — added only when needed, and
+            // grouped into a single all-or-nothing sub-object to keep the
+            // compiled grammar tractable (see method header).
             if (context != null && context.GeometryCount >= 2)
             {
                 var geometryItemProps =
                     (JObject)props["geometry"]["items"]["properties"];
 
-                geometryItemProps["subcategory"] = new JObject { ["type"] = "string" };
-                geometryItemProps["convention"]  = new JObject { ["type"] = "string" };
-                geometryItemProps["left_plane"]  = new JObject { ["type"] = "string" };
-                geometryItemProps["right_plane"] = new JObject { ["type"] = "string" };
-                geometryItemProps["front_plane"] = new JObject { ["type"] = "string" };
-                geometryItemProps["back_plane"]  = new JObject { ["type"] = "string" };
-                geometryItemProps["base_plane"]  = new JObject { ["type"] = "string" };
-                geometryItemProps["top_plane"]   = new JObject { ["type"] = "string" };
+                geometryItemProps["plane_overrides"] = new JObject
+                {
+                    ["type"]                 = "object",
+                    ["additionalProperties"] = false,
+                    ["required"] = new JArray(
+                        "left_plane", "right_plane",
+                        "front_plane", "back_plane",
+                        "base_plane",  "top_plane"),
+                    ["properties"] = new JObject
+                    {
+                        ["left_plane"]  = new JObject { ["type"] = "string" },
+                        ["right_plane"] = new JObject { ["type"] = "string" },
+                        ["front_plane"] = new JObject { ["type"] = "string" },
+                        ["back_plane"]  = new JObject { ["type"] = "string" },
+                        ["base_plane"]  = new JObject { ["type"] = "string" },
+                        ["top_plane"]   = new JObject { ["type"] = "string" }
+                    }
+                };
             }
 
             return schema;

@@ -173,13 +173,14 @@ namespace RevitFamilyBuilder.Services
             "- width/depth/height_parameter: each extrusion can use its OWN parameters " +
             "(e.g. collar uses Width/Depth/CollarLength while flange uses " +
             "FlangeWidth/FlangeDepth/FlangeThickness).\n" +
-            "- subcategory / convention : optional.\n" +
-            "- left_plane / right_plane / front_plane / back_plane / base_plane / top_plane : " +
-            "OPTIONAL plane-name overrides. Omit (null) to fall back to the canonical " +
-            "Left / Right / Front / Back / Base / Top.\n\n" +
+            "- plane_overrides   : OPTIONAL sub-object. When present, ALL six plane names " +
+            "MUST be specified (left_plane, right_plane, front_plane, back_plane, " +
+            "base_plane, top_plane). When ABSENT, the geometry falls back to the canonical " +
+            "Left / Right / Front / Back / Base / Top. There is no per-field optionality — " +
+            "it is all-or-nothing by design (keeps the strict-output grammar small).\n\n" +
 
             "PLAN RULES (CRITICAL):\n" +
-            "- Any plane named in a *_plane override MUST be declared in reference_planes; " +
+            "- Any plane named inside plane_overrides MUST be declared in reference_planes; " +
             "the validator rejects unknown names.\n" +
             "- The Z-bounding planes of any secondary extrusion (flange Bot/Top, midpoint " +
             "pin, etc.) MUST use orientation \"elevation\". With \"horizontal\" they " +
@@ -198,7 +199,10 @@ namespace RevitFamilyBuilder.Services
             "the body's length flexes, pin the flange's mid-Z plane with " +
             "EQ Base ↔ FlangeMidZ ↔ Top.\n\n" +
 
-            "Example structure (collar + flange, abridged):\n" +
+            "Example structure (collar + flange, abridged). Note that the FIRST geometry " +
+            "(the body) omits plane_overrides and relies on the canonical planes; the " +
+            "SECOND geometry (the flange) supplies all six plane names through " +
+            "plane_overrides:\n" +
             "  parameters       : Width, Depth, CollarLength, FlangeWidth, FlangeDepth, FlangeThickness\n" +
             "  reference_planes : Mid_LR, Center_FB, Left/Right (vertical), Front/Back " +
             "(horizontal), Base/Top (elevation), FlangeLeft/Right (vertical), " +
@@ -207,10 +211,12 @@ namespace RevitFamilyBuilder.Services
             "                       { id:\"collar_main\", width_parameter:\"Width\", " +
             "depth_parameter:\"Depth\", height_parameter:\"CollarLength\" },\n" +
             "                       { id:\"flange_mid\", width_parameter:\"FlangeWidth\", " +
-            "depth_parameter:\"FlangeDepth\", height_parameter:\"FlangeThickness\", " +
-            "left_plane:\"FlangeLeft\", right_plane:\"FlangeRight\", " +
-            "front_plane:\"FlangeFront\", back_plane:\"FlangeBack\", " +
-            "base_plane:\"FlangeBot\", top_plane:\"FlangeTop\" }\n" +
+            "depth_parameter:\"FlangeDepth\", height_parameter:\"FlangeThickness\",\n" +
+            "                         plane_overrides: {\n" +
+            "                           left_plane:\"FlangeLeft\",   right_plane:\"FlangeRight\",\n" +
+            "                           front_plane:\"FlangeFront\", back_plane:\"FlangeBack\",\n" +
+            "                           base_plane:\"FlangeBot\",    top_plane:\"FlangeTop\"\n" +
+            "                         } }\n" +
             "                     ]\n\n" +
 
             "Scope: this PR supports MULTI-GEOMETRY RECTANGULAR EXTRUSIONS only with " +
