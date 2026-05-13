@@ -242,6 +242,7 @@ namespace RevitFamilyBuilder
             string generationScope,
             string geometryCount,
             string geometryBreakdown,
+            string capabilities,
             string typeCount,
             string familyLogic)
         {
@@ -261,6 +262,7 @@ namespace RevitFamilyBuilder
                 ? "—" : FormatGenerationScope(generationScope);
             AiReviewGeometryCountText.Text     = string.IsNullOrWhiteSpace(geometryCount)     ? "—" : geometryCount;
             AiReviewGeometryBreakdownText.Text = string.IsNullOrWhiteSpace(geometryBreakdown) ? "—" : geometryBreakdown;
+            AiReviewCapabilitiesText.Text      = string.IsNullOrWhiteSpace(capabilities)      ? "—" : capabilities;
             AiReviewTypeCountText.Text = string.IsNullOrWhiteSpace(typeCount) ? "—" : typeCount;
             // TypeSelectionPanel is populated separately by PopulateTypeSelection().
             AiReviewFamilyLogicText.Text = string.IsNullOrWhiteSpace(familyLogic) ? "—" : familyLogic;
@@ -350,16 +352,31 @@ namespace RevitFamilyBuilder
             string reviewJson = JsonConvert.SerializeObject(_pendingReview, Formatting.Indented);
 
             // Build the family context from the review JObject so Call 2's
-            // schema stays minimal for single-geometry prompts (avoids the
-            // Anthropic 503 grammar_compilation overload). Defensive defaults
-            // keep this safe if the review is missing these fields for any
-            // reason.
+            // schema stays minimal for prompts that don't need every section
+            // (avoids the Anthropic 503 grammar_compilation overload).
+            // Defensive defaults keep this safe if any field is missing from
+            // the review — the worst case is a smaller schema than Claude
+            // would have liked, which is recoverable via Regenerate.
             var familyContext = new FamilyContext
             {
-                GeometryCount = _pendingReview?["geometry_count"]?.Value<int>() ?? 1,
-                BuildStrategy = _pendingReview?["build_strategy"]?.Value<string>()
-                                ?? "single_type"
+                GeometryCount       = _pendingReview?["geometry_count"]?.Value<int>()         ?? 1,
+                BuildStrategy       = _pendingReview?["build_strategy"]?.Value<string>()      ?? "single_type",
+                RequiresTypes       = _pendingReview?["requires_types"]?.Value<bool>()        ?? false,
+                RequiresFormulas    = _pendingReview?["requires_formulas"]?.Value<bool>()     ?? false,
+                RequiresVoids       = _pendingReview?["requires_voids"]?.Value<bool>()        ?? false,
+                RequiresConnectors  = _pendingReview?["requires_connectors"]?.Value<bool>()   ?? false,
+                RequiresLookupTable = _pendingReview?["requires_lookup_table"]?.Value<bool>() ?? false
             };
+
+            // Defensive normalisation: a lookup table is always backed by
+            // types[] in the engine (TryEmbedLookupTable reads from the
+            // generated types), so an inconsistent review where
+            // requires_lookup_table = true but requires_types = false would
+            // produce a schema without types[] and a build_strategy that
+            // immediately fails. Force the implication client-side rather
+            // than trusting Claude's review to be self-consistent.
+            if (familyContext.RequiresLookupTable)
+                familyContext.RequiresTypes = true;
 
             // First attempt.
             string firstJson;
@@ -607,9 +624,24 @@ namespace RevitFamilyBuilder
                 ? string.Join("\n", geometryBreakdownArr.Values<string>())
                 : string.Empty;
 
+            // Capability flags — collect the labels for whichever requires_*
+            // flag the review set to true. Display as a short comma-separated
+            // string; "None" when no extra section will be generated. Older
+            // reviews without these fields render "None" without crashing.
+            var capLabels = new List<string>();
+            if (review?["requires_types"]?.Value<bool>()        ?? false) capLabels.Add("Types");
+            if (review?["requires_formulas"]?.Value<bool>()     ?? false) capLabels.Add("Formulas");
+            if (review?["requires_voids"]?.Value<bool>()        ?? false) capLabels.Add("Voids");
+            if (review?["requires_connectors"]?.Value<bool>()   ?? false) capLabels.Add("Connectors");
+            if (review?["requires_lookup_table"]?.Value<bool>() ?? false) capLabels.Add("Lookup table");
+            string capabilities = capLabels.Count > 0
+                ? string.Join(", ", capLabels)
+                : "None";
+
             FillAiReviewCard(
                 matchStatus, model, dimensions, source, confidence, warnings, summary,
-                generationScope, geometryCount, geometryBreakdown, typeCount, familyLogic);
+                generationScope, geometryCount, geometryBreakdown, capabilities,
+                typeCount, familyLogic);
             return matchStatus;
         }
 

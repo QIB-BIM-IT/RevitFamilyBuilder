@@ -104,7 +104,44 @@ namespace RevitFamilyBuilder.Services
             "If the row is not legible: add a warning and fall back to standard defaults.\n" +
             "Unit conversion: inches × 25.4 → mm; cm × 10 → mm.\n" +
             "Column mapping: H → Height, W → Width, D → Depth " +
-            "(add warning if headers are absent).";
+            "(add warning if headers are absent).\n\n" +
+
+            "== Capability detection ==\n" +
+            "Five booleans tell the engine which sections to include in the Call 2 schema. " +
+            "Set each one ONLY when the prompt or attached document clearly justifies it. " +
+            "False is the safe default — when in doubt, leave it false (the family JSON " +
+            "stays minimal and Anthropic's grammar compiler stays fast).\n\n" +
+
+            "  requires_types        : true when multiple distinct product variants must be " +
+            "modelled in a single family. Typical triggers: a product table with several " +
+            "catalog numbers and dimension columns (e.g. Carlon E989NNJ / E987N / E989NNR / …), " +
+            "or a prompt that names several sizes (\"800×500, 1000×600, 1200×800\"). Single " +
+            "size or single variant → false.\n" +
+            "  requires_formulas     : true when a parametric relationship is explicit. " +
+            "Examples: \"Height = Width / 2\", \"FlangeWidth = BodyWidth + 2 × Overhang\". " +
+            "If the user only provides absolute numbers without stating a relationship, " +
+            "leave false. Detected_formulas being non-empty is the strongest signal for " +
+            "this flag.\n" +
+            "  requires_voids        : true when the product has a visible cutout, opening, " +
+            "slot, or perforation that must be modelled as a void in the family. Most generic " +
+            "boxes and equipment → false.\n" +
+            "  requires_connectors   : true when the product is an MEP component with named " +
+            "duct/pipe connection points (fire damper, register, diffuser, fitting, " +
+            "elbow, etc.) AND the user expects those connection points to be modelled " +
+            "in the family. Simple boxes without connections → false.\n" +
+            "  requires_lookup_table : VERY rare. True ONLY when the user explicitly asks " +
+            "for a size lookup / size table, or when the datasheet itself names a lookup " +
+            "system. For all other cases → false.\n\n" +
+
+            "Coherence with build_strategy:\n" +
+            "  build_strategy = \"single_type\"    → requires_types = false (and " +
+            "requires_lookup_table = false).\n" +
+            "  build_strategy = \"explicit_types\" → requires_types = true.\n" +
+            "  build_strategy = \"lookup_table\"   → requires_lookup_table = true AND " +
+            "requires_types = true (the engine needs the types[] array to build the " +
+            "lookup CSV).\n" +
+            "These rules are non-negotiable: a mismatch between build_strategy and the " +
+            "two related flags is a self-contradicting review.";
 
         // ── Call 2: Family JSON system prompt ────────────────────────────────
         // Output: a single JSON object — the family definition directly.

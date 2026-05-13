@@ -11,11 +11,10 @@ namespace RevitFamilyBuilder.Services
 {
     /// <summary>
     /// Lightweight context object derived from the Call 1 review JSON and used
-    /// to parameterise the Call 2 family schema. The minimal set today is the
-    /// number of geometries and the build strategy; both come straight from
-    /// review fields. Future PRs will extend this with requires_voids /
-    /// requires_formulas / requires_connectors flags so the schema can also
-    /// drop those sections when the user's prompt does not need them.
+    /// to parameterise the Call 2 family schema, so the compiled grammar only
+    /// includes the sections the prompt actually needs. Every flag is mirrored
+    /// by a <c>requires_*</c> field on the review schema; the AI sets each one
+    /// based on the prompt and the attached image/PDF.
     /// </summary>
     public class FamilyContext
     {
@@ -24,6 +23,21 @@ namespace RevitFamilyBuilder.Services
 
         /// <summary>Build strategy from the review (single_type / explicit_types / lookup_table).</summary>
         public string BuildStrategy { get; set; }
+
+        /// <summary>When true, the Call 2 schema exposes <c>types[]</c> so Claude can emit per-type parameter overrides. Implied by RequiresLookupTable (see MainWindow normalisation).</summary>
+        public bool RequiresTypes { get; set; }
+
+        /// <summary>When true, the Call 2 schema exposes <c>formulas[]</c> so Claude can emit parametric relationships (e.g. <c>Height = Width / 2</c>).</summary>
+        public bool RequiresFormulas { get; set; }
+
+        /// <summary>When true, the Call 2 schema exposes <c>voids[]</c> (pipe-shorthand string array; expanded client-side by <c>ExpandVoidShorthand</c>).</summary>
+        public bool RequiresVoids { get; set; }
+
+        /// <summary>When true, the Call 2 schema exposes <c>connectors[]</c> for MEP fittings. Rectangular profile only in this PR; Round will return with the cylinder support.</summary>
+        public bool RequiresConnectors { get; set; }
+
+        /// <summary>When true, the engine embeds a size-lookup CSV at build time. Pure marker today — the actual switch is <c>build_strategy = "lookup_table"</c>, which is what the engine reads. MainWindow normalises this flag to imply RequiresTypes.</summary>
+        public bool RequiresLookupTable { get; set; }
     }
 
     /// <summary>
@@ -383,7 +397,9 @@ namespace RevitFamilyBuilder.Services
                     "confidence", "warnings", "build_summary",
                     "detected_type_count", "detected_types",
                     "selected_family_logic", "detected_formulas", "formula_summary",
-                    "geometry_count", "geometry_breakdown"),
+                    "geometry_count", "geometry_breakdown",
+                    "requires_types", "requires_formulas", "requires_voids",
+                    "requires_connectors", "requires_lookup_table"),
                 ["properties"]           = new JObject
                 {
                     ["match_status"] = new JObject
@@ -438,7 +454,15 @@ namespace RevitFamilyBuilder.Services
                     {
                         ["type"]  = "array",
                         ["items"] = new JObject { ["type"] = "string" }
-                    }
+                    },
+                    // Capability flags — drive the Call 2 schema shape so we
+                    // only ask Claude for the sections the prompt actually
+                    // needs. See FamilyContext for the runtime counterpart.
+                    ["requires_types"]        = new JObject { ["type"] = "boolean" },
+                    ["requires_formulas"]     = new JObject { ["type"] = "boolean" },
+                    ["requires_voids"]        = new JObject { ["type"] = "boolean" },
+                    ["requires_connectors"]   = new JObject { ["type"] = "boolean" },
+                    ["requires_lookup_table"] = new JObject { ["type"] = "boolean" }
                 }
             };
         }
@@ -467,9 +491,19 @@ namespace RevitFamilyBuilder.Services
         // Per-geometry conventions will return in a future PR if the use
         // case justifies the schema cost.
         //
-        // INTENTIONALLY EXCLUDED: formulas, types, voids. The follow-up
-        // "gros cohérent" PR will gate them on review-level flags
-        // (requires_formulas / requires_voids / requires_connectors).
+        // GATED ON CAPABILITY FLAGS (review.requires_*):
+        //   - types[]      : when RequiresTypes is true (also implied by
+        //                    RequiresLookupTable via MainWindow normalisation).
+        //   - formulas[]   : when RequiresFormulas is true.
+        //   - voids[]      : when RequiresVoids is true. Format = array of
+        //                    pipe-shorthand strings ("name|width|height");
+        //                    ExpandVoidShorthand inflates them client-side.
+        //   - connectors[] : when RequiresConnectors is true. Rectangular
+        //                    profile only in this PR (single-value enum
+        //                    keeps the grammar tight).
+        //   RequiresLookupTable does NOT add a separate schema field — the
+        //   engine triggers TryEmbedLookupTable from build_strategy alone.
+        //
         // The server-side sample (SampleJsonService) is unaffected because
         // it bypasses Anthropic entirely.
         private static JObject BuildFamilySchema(FamilyContext context)
@@ -511,6 +545,117 @@ namespace RevitFamilyBuilder.Services
                         ["back_plane"]  = new JObject { ["type"] = "string" },
                         ["base_plane"]  = new JObject { ["type"] = "string" },
                         ["top_plane"]   = new JObject { ["type"] = "string" }
+                    }
+                };
+            }
+
+            if (context != null && context.RequiresFormulas)
+            {
+                props["formulas"] = new JObject
+                {
+                    ["type"]  = "array",
+                    ["items"] = new JObject
+                    {
+                        ["type"]                 = "object",
+                        ["additionalProperties"] = false,
+                        ["required"]             = new JArray("parameter_name", "expression"),
+                        ["properties"]           = new JObject
+                        {
+                            ["parameter_name"] = new JObject { ["type"] = "string" },
+                            ["expression"]     = new JObject { ["type"] = "string" }
+                        }
+                    }
+                };
+            }
+
+            if (context != null && context.RequiresTypes)
+            {
+                props["types"] = new JObject
+                {
+                    ["type"]  = "array",
+                    ["items"] = new JObject
+                    {
+                        ["type"]                 = "object",
+                        ["additionalProperties"] = false,
+                        ["required"]             = new JArray("name"),
+                        ["properties"]           = new JObject
+                        {
+                            ["name"] = new JObject { ["type"] = "string" },
+                            ["parameter_values"] = new JObject
+                            {
+                                ["type"]                 = "object",
+                                ["additionalProperties"] = false,
+                                ["properties"]           = new JObject
+                                {
+                                    ["Width"]  = new JObject { ["type"] = "string" },
+                                    ["Depth"]  = new JObject { ["type"] = "string" },
+                                    ["Height"] = new JObject { ["type"] = "string" }
+                                }
+                            }
+                        }
+                    }
+                };
+            }
+
+            if (context != null && context.RequiresVoids)
+            {
+                // Pipe-shorthand "name|width_parameter|height_parameter"
+                // (kept as array-of-strings for minimal grammar cost).
+                // MainWindow.ExpandVoidShorthand inflates each entry into the
+                // full VoidDefinition object that the validator/engine expect.
+                props["voids"] = new JObject
+                {
+                    ["type"]  = "array",
+                    ["items"] = new JObject { ["type"] = "string" }
+                };
+            }
+
+            if (context != null && context.RequiresConnectors)
+            {
+                // Rectangular profile only in this PR (single-value enum
+                // keeps the grammar small). All fields are required so each
+                // connector item is monolithic — no internal combinatorial.
+                props["connectors"] = new JObject
+                {
+                    ["type"]  = "array",
+                    ["items"] = new JObject
+                    {
+                        ["type"]                 = "object",
+                        ["additionalProperties"] = false,
+                        ["required"] = new JArray(
+                            "name", "target_geometry_id", "target_face",
+                            "flow_direction", "system_classification",
+                            "profile", "width_parameter", "height_parameter"),
+                        ["properties"] = new JObject
+                        {
+                            ["name"]               = new JObject { ["type"] = "string" },
+                            ["target_geometry_id"] = new JObject { ["type"] = "string" },
+                            ["target_face"] = new JObject
+                            {
+                                ["type"] = "string",
+                                ["enum"] = new JArray(
+                                    "front", "back", "left", "right", "top", "bottom")
+                            },
+                            ["flow_direction"] = new JObject
+                            {
+                                ["type"] = "string",
+                                ["enum"] = new JArray("in", "out", "bidirectional")
+                            },
+                            ["system_classification"] = new JObject
+                            {
+                                ["type"] = "string",
+                                ["enum"] = new JArray(
+                                    "Global", "SupplyAir", "ReturnAir",
+                                    "ExhaustAir", "Fitting")
+                            },
+                            ["profile"] = new JObject
+                            {
+                                ["type"] = "string",
+                                ["enum"] = new JArray("Rectangular")
+                            },
+                            ["width_parameter"]  = new JObject { ["type"] = "string" },
+                            ["height_parameter"] = new JObject { ["type"] = "string" }
+                        }
                     }
                 };
             }
