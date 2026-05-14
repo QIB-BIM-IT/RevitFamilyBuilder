@@ -155,7 +155,17 @@ namespace RevitFamilyBuilder.FamilyBuilder
             }
         }
 
-        public int AddParameters(Document familyDoc, FamilyDefinition definition)
+        // Adds the parameters declared in <paramref name="definition"/> to the
+        // family document. Each parameter is first looked up in the company
+        // shared-parameters file (<c>CompanyPaths.GetSharedParametersPath()</c>);
+        // when it is present AND its spec type matches the JSON's declared
+        // type, the parameter is created as a SHARED parameter (federated by
+        // GUID across families). Any other case — missing file, missing entry,
+        // or spec mismatch — falls back to a LOCAL parameter and adds a
+        // warning explaining why. The "happy path" (SHARED) emits no warning;
+        // a quiet warnings list means every parameter was properly federated.
+        public int AddParameters(
+            Document familyDoc, FamilyDefinition definition, IList<string> warnings)
         {
             if (definition.Parameters == null || definition.Parameters.Count == 0)
                 return 0;
@@ -165,6 +175,15 @@ namespace RevitFamilyBuilder.FamilyBuilder
             var existingNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (FamilyParameter existing in fm.GetParameters())
                 existingNames.Add(existing.Definition.Name);
+
+            // Load the shared-parameters file once per batch. May return null
+            // in degraded mode (file missing, malformed, or unreachable on
+            // ACC) — that's not blocking: every parameter just falls back to
+            // local. TryLoadSharedDefinitions emits a SINGLE global warning
+            // in that case, which is enough — we don't repeat "shared file
+            // unavailable" once per parameter.
+            DefinitionFile sharedFile =
+                TryLoadSharedDefinitions(familyDoc.Application, warnings);
 
             int created = 0;
 
@@ -180,21 +199,79 @@ namespace RevitFamilyBuilder.FamilyBuilder
                     ForgeTypeId specType  = MapSpecTypeId(paramDef.Type);
                     ForgeTypeId groupType = MapGroupTypeId(paramDef.Group);
 
-                    try
-                    {
-                        FamilyParameter fp = fm.AddParameter(
-                            paramDef.Name, groupType, specType, paramDef.IsInstance);
+                    // ── Attempt SHARED creation first ─────────────────────
+                    ExternalDefinition extDef =
+                        FindSharedDefinition(sharedFile, paramDef.Name);
 
-                        if (fp != null)
+                    bool   createdAsShared = false;
+                    string fallbackReason  = null;
+
+                    if (extDef != null)
+                    {
+                        ForgeTypeId sharedSpec = extDef.GetDataType();
+                        if (sharedSpec != null && sharedSpec.Equals(specType))
                         {
-                            TrySetDefaultValue(fm, fp, paramDef);
-                            existingNames.Add(paramDef.Name);
-                            created++;
+                            try
+                            {
+                                FamilyParameter fp = fm.AddParameter(
+                                    extDef, groupType, paramDef.IsInstance);
+                                if (fp != null)
+                                {
+                                    TrySetDefaultValue(fm, fp, paramDef);
+                                    existingNames.Add(paramDef.Name);
+                                    created++;
+                                    createdAsShared = true;
+                                    Debug.WriteLine(
+                                        "[SharedParam] \"" + paramDef.Name
+                                        + "\" created as SHARED.");
+                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                fallbackReason = "shared creation failed ("
+                                    + ex.Message + ")";
+                            }
+                        }
+                        else
+                        {
+                            string sharedSpecId = sharedSpec != null
+                                ? sharedSpec.TypeId : "<unknown>";
+                            fallbackReason = "spec mismatch (JSON declares "
+                                + paramDef.Type + ", shared file declares "
+                                + sharedSpecId + ")";
                         }
                     }
-                    catch
+                    else if (sharedFile != null)
                     {
-                        // Skip any parameter that fails; continue with the rest.
+                        fallbackReason = "not found in shared parameters file";
+                    }
+                    // else: sharedFile == null → global warning already
+                    // emitted; do not repeat per parameter.
+
+                    // ── LOCAL fallback ────────────────────────────────────
+                    if (!createdAsShared)
+                    {
+                        try
+                        {
+                            FamilyParameter fp = fm.AddParameter(
+                                paramDef.Name, groupType, specType, paramDef.IsInstance);
+
+                            if (fp != null)
+                            {
+                                TrySetDefaultValue(fm, fp, paramDef);
+                                existingNames.Add(paramDef.Name);
+                                created++;
+                                if (fallbackReason != null)
+                                    warnings.Add("Parameter \""
+                                        + paramDef.Name + "\" created as LOCAL: "
+                                        + fallbackReason + ".");
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            warnings.Add("Parameter \"" + paramDef.Name
+                                + "\" creation failed: " + ex.Message + ".");
+                        }
                     }
                 }
 
@@ -202,6 +279,72 @@ namespace RevitFamilyBuilder.FamilyBuilder
             }
 
             return created;
+        }
+
+        // Loads the company shared-parameters file (path resolved through
+        // <c>CompanyPaths.GetSharedParametersPath()</c>) and returns the
+        // resulting <c>DefinitionFile</c>. Returns <c>null</c> when the file
+        // is missing, malformed, or the Revit API refuses to open it; in
+        // every null-return case, a single descriptive warning is appended to
+        // <paramref name="warnings"/> so the caller can render it in the
+        // build report. Callers should treat null as "degraded mode — every
+        // parameter must be created locally" and proceed.
+        private static DefinitionFile TryLoadSharedDefinitions(
+            Application app, IList<string> warnings)
+        {
+            string path = CompanyPaths.GetSharedParametersPath();
+
+            if (!File.Exists(path))
+            {
+                warnings.Add("Shared parameters file not found at " + path
+                    + ". All parameters will be created as local.");
+                return null;
+            }
+
+            try
+            {
+                app.SharedParametersFilename = path;
+                DefinitionFile file = app.OpenSharedParameterFile();
+                if (file == null)
+                {
+                    warnings.Add("Failed to open shared parameters file at "
+                        + path + " (OpenSharedParameterFile returned null). "
+                        + "All parameters will be created as local.");
+                }
+                return file;
+            }
+            catch (Exception ex)
+            {
+                warnings.Add("Error opening shared parameters file at " + path
+                    + ": " + ex.Message
+                    + ". All parameters will be created as local.");
+                return null;
+            }
+        }
+
+        // Looks up a single shared-parameter definition by name across every
+        // group in the loaded <see cref="DefinitionFile"/>. Case-insensitive
+        // match — Revit shared-parameter names are conventionally case
+        // sensitive, but accepting case-insensitive matches here surfaces
+        // typos as obvious "spec mismatch" or "not found" warnings rather
+        // than silent local creation. Returns the first
+        // <c>ExternalDefinition</c> found, or <c>null</c> if absent.
+        private static ExternalDefinition FindSharedDefinition(
+            DefinitionFile sharedFile, string parameterName)
+        {
+            if (sharedFile == null || string.IsNullOrWhiteSpace(parameterName))
+                return null;
+
+            foreach (DefinitionGroup grp in sharedFile.Groups)
+            {
+                foreach (Definition def in grp.Definitions)
+                {
+                    if (string.Equals(def.Name, parameterName,
+                            StringComparison.OrdinalIgnoreCase))
+                        return def as ExternalDefinition;
+                }
+            }
+            return null;
         }
 
         // Applies formula expressions to family parameters using Revit's family parameter API.

@@ -32,24 +32,20 @@ namespace RevitFamilyBuilder.Services
             // Resolve the ACC root and the company asset paths up front so
             // the build report's "Standards d'entreprise" section reflects
             // exactly the paths that were actually used. The shared-parameters
-            // file is only checked for existence in this PR — it is not
-            // loaded yet (future PR concern).
+            // file is now CONSUMED by the engine (see FamilyBuilderEngine
+            // .AddParameters → TryLoadSharedDefinitions) — that path emits
+            // its own descriptive warning when the file is missing or
+            // unreadable, so this probe only computes the status flag used
+            // by the report header below; no duplicate warning is added here.
             string accRoot              = CompanyPaths.GetAccRoot();
             string sharedParametersPath = CompanyPaths.GetSharedParametersPath();
             bool   sharedParametersFound = File.Exists(sharedParametersPath);
-            if (!sharedParametersFound)
-            {
-                warnings.Add(
-                    "SharedParameters introuvable à " + sharedParametersPath
-                    + " (sera nécessaire pour les futures fonctionnalités "
-                    + "de paramètres partagés).");
-            }
 
             string templateLabel;
             Document familyDoc    = _engine.CreateFamilyDocument(
                 definition, uiApp, warnings, out templateLabel);
             string categoryStatus = _engine.ApplyCategory(familyDoc, definition);
-            int paramCount        = _engine.AddParameters(familyDoc, definition);
+            int paramCount        = _engine.AddParameters(familyDoc, definition, warnings);
 
             // Add the LookupKey text parameter before any type work so it exists
             // when we set per-type values later.
